@@ -127,6 +127,7 @@ async def run_v4(
     cached_tagger_result: Any = None,
     cached_map_result: Any = None,
     return_intermediates: bool = False,
+    hackathon_mode: bool = False,
 ) -> dict[str, Any]:
     """Run the V4 pipeline on a repo and return a structured payload.
 
@@ -365,6 +366,7 @@ async def run_v4(
                         tagger_result=tagger_result,
                         map_phase_result=map_result,
                         gemini_client=client,
+                        hackathon_mode=hackathon_mode,
                     )
                 except Exception as e:  # noqa: BLE001
                     # reduce_phase has its own fallback; this guards truly
@@ -437,6 +439,7 @@ async def run_v4_cached(
     *,
     run_full_pipeline: bool = True,
     enable_verify: bool = True,
+    hackathon_mode: bool = False,
 ) -> dict[str, Any]:
     """Run the V4 pipeline with two-tier cache support.
 
@@ -474,8 +477,11 @@ async def run_v4_cached(
     except Exception as e:  # noqa: BLE001
         log.warning("[v4-shadow] code_hash compute failed, bypassing cache: %s", e)
 
-    # Tier-2 check — instant return on hit
-    if code_hash and github_username:
+    # Tier-2 check — instant return on hit. Skipped entirely in hackathon
+    # mode: hackathon-mode rescales the score (drops forensics, scales to 100),
+    # so reusing or writing tier-2 entries would mix incompatible scores
+    # across hackathon and standalone audits of the same (repo, applicant).
+    if code_hash and github_username and not hackathon_mode:
         try:
             with db_session_factory() as db:
                 cached_output = V4CacheService.get(
@@ -527,6 +533,7 @@ async def run_v4_cached(
         cached_tagger_result=cached_tagger,
         cached_map_result=cached_map,
         return_intermediates=True,
+        hackathon_mode=hackathon_mode,
     )
     result["code_hash"] = code_hash
     result["cache_reused"]["tier2"] = False
@@ -548,8 +555,9 @@ async def run_v4_cached(
             except Exception as e:  # noqa: BLE001
                 log.warning("[v4-shadow] tier1 write failed: %s", e)
 
-        # Tier-2: write any successful per-applicant output
-        if github_username and v4_output:
+        # Tier-2: write any successful per-applicant output. Skipped in
+        # hackathon mode for the same collision reason as the read path.
+        if github_username and v4_output and not hackathon_mode:
             try:
                 with db_session_factory() as db:
                     V4CacheService.put(

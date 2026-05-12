@@ -1,0 +1,210 @@
+"""Hackathon platform models.
+
+Three tables:
+
+  * ``hackathon`` — event metadata, sponsors, settings
+  * ``hackathon_role`` — many-to-many between User and Hackathon with role
+    (organizer / judge / participant)
+  * ``hackathon_submission`` — one row per submitter team per event,
+    referencing the underlying Project audited
+
+A submission **is** a Project (existing model). We don't duplicate the
+GitHub URL or audit machinery — we link to the existing project_id.
+The audit pipeline runs in `hackathon_mode` (set via the corresponding
+flag on the Hackathon row's settings_json).
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from enum import Enum
+
+from sqlalchemy import (
+    Column, String, JSON, DateTime, Index, Integer, ForeignKey, Boolean,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+
+from app.database import Base
+
+
+class HackathonRoleType(str, Enum):
+    ORGANIZER = "organizer"
+    JUDGE = "judge"
+    PARTICIPANT = "participant"
+
+
+class SubmissionStatus(str, Enum):
+    DRAFT = "draft"            # being edited
+    SUBMITTED = "submitted"    # locked at deadline
+    WITHDRAWN = "withdrawn"    # dev pulled it before deadline
+
+
+class AuditStatus(str, Enum):
+    PENDING = "pending"        # not yet started
+    RUNNING = "running"        # BackgroundTasks dispatched
+    COMPLETE = "complete"      # repo_score available
+    FAILED = "failed"          # error, see audit_error
+
+
+# ─── Hackathon ────────────────────────────────────────────────────────────────
+
+class Hackathon(Base):
+    __tablename__ = "hackathon"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    slug = Column(String(80), nullable=False, unique=True)
+    name = Column(String(200), nullable=False)
+    description = Column(String, nullable=True)
+
+    # Organizer (the user who created this event). HackathonRole rows control
+    # downstream access; this is just for "owner of the event."
+    organizer_user_id = Column(String, ForeignKey("user.id"), nullable=False)
+
+    # Lifecycle dates (UTC)
+    starts_at = Column(DateTime, nullable=True)
+    submissions_close_at = Column(DateTime, nullable=True)  # default 4-6h before judging
+    judging_starts_at = Column(DateTime, nullable=True)
+    ends_at = Column(DateTime, nullable=True)
+
+    # Single shared join code per event. Per-participant codes are v2.
+    access_code = Column(String(32), nullable=False, unique=True)
+
+    # Code-based admin access for non-dev organizers (no GitHub OAuth needed).
+    # Pasting this on /hackathons/{slug}/admin/login sets a 30-day cookie that
+    # grants the same access as the GitHub-authed organizer role. Nullable for
+    # rows created before this column existed.
+    organizer_access_code = Column(String(64), nullable=True, unique=True)
+
+    # JSON config bag — keeps schema flexible during MVP iteration:
+    #   {
+    #     "skip_authorship_check": true,
+    #     "skip_forensics": true,
+    #     "extras_required": ["deployed_url", "demo_video_url", "description"],
+    #     "extras_optional": ["slide_deck_url", "tech_stack_tags"],
+    #     "max_team_size": null,    # null = no system cap
+    #     "rules_text": "..."
+    #   }
+    settings_json = Column(JSON, nullable=False, default=dict)
+
+    # Per-event sponsor list (NOT a precompiled catalog). Shape:
+    #   [
+    #     {"name": "Resend", "packages": ["resend", "@resend/node"], "prize": "$2k"},
+    #     {"name": "Convex", "packages": ["convex", "@convex-dev/auth"]},
+    #     ...
+    #   ]
+    sponsors_json = Column(JSON, nullable=False, default=list)
+
+    # Leaderboard publishing toggle. None = not yet published.
+    published_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        Index("ix_hackathon_slug", "slug"),
+        Index("ix_hackathon_organizer", "organizer_user_id"),
+    )
+
+
+# ─── HackathonRole ────────────────────────────────────────────────────────────
+
+class HackathonRole(Base):
+    """Many-to-many between User and Hackathon with role.
+
+    A single user can have at most one role per hackathon — we enforce
+    via unique constraint. Roles:
+      - organizer: full admin (settings, awards, exports, publish)
+      - judge: read submissions + comment, no settings
+      - participant: can submit / be on a team
+    """
+    __tablename__ = "hackathon_role"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    hackathon_id = Column(UUID(as_uuid=True), ForeignKey("hackathon.id"), nullable=False)
+    user_id = Column(String, ForeignKey("user.id"), nullable=False)
+    role = Column(String(20), nullable=False)  # 'organizer' | 'judge' | 'participant'
+
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("hackathon_id", "user_id", name="uq_hackathon_role_user"),
+        Index("ix_hackathon_role_hackathon", "hackathon_id"),
+        Index("ix_hackathon_role_user", "user_id"),
+    )
+
+
+# ─── HackathonSubmission ──────────────────────────────────────────────────────
+
+class HackathonSubmission(Base):
+    """One submission per submitter+event. Links to an existing Project row."""
+    __tablename__ = "hackathon_submission"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    hackathon_id = Column(UUID(as_uuid=True), ForeignKey("hackathon.id"), nullable=False)
+    submitter_user_id = Column(String, ForeignKey("user.id"), nullable=False)
+
+    # The audited project. Nullable because we create the submission row
+    # first, then create the Project + ProjectAudit when the form is filled.
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True)
+
+    # Submission content
+    github_url = Column(String, nullable=False)
+    extras_json = Column(JSON, nullable=False, default=dict)
+    # Shape: {
+    #   "deployed_url": "https://...",
+    #   "demo_video_url": "https://youtu.be/...",
+    #   "slide_deck_url": "https://...",
+    #   "description": "...",
+    #   "tech_stack_tags": ["python", "react"],
+    #   "problem_statement": "..."
+    # }
+
+    # Team members as a list of GitHub usernames (NOT user_ids — we link
+    # to existing users at display time via `User.githubUsername`, and
+    # auto-link new sign-ups whose GitHub username appears in any team
+    # list when they OAuth in for the first time).
+    team_members_json = Column(JSON, nullable=False, default=list)
+
+    # Sponsors matched against this submission's audit (cross-reference of
+    # claim.sdk_packages_used vs hackathon.sponsors_json[].packages).
+    # Computed at audit-complete time. Shape: {sponsor_name: [claim_ids...]}.
+    matched_sponsors_json = Column(JSON, nullable=False, default=dict)
+
+    # Status fields
+    submission_status = Column(String(20), nullable=False, default=SubmissionStatus.DRAFT.value)
+    audit_status = Column(String(20), nullable=False, default=AuditStatus.PENDING.value)
+    audit_error = Column(String, nullable=True)
+
+    # Dev-controlled flag: pin this finished hackathon to my public profile
+    # (/p/<username>). Only meaningful once audit_status='complete'.
+    pinned_to_profile = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    submitted_at = Column(DateTime, nullable=True)
+    withdrawn_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        # One submission per submitter per hackathon (decision #2 from plan).
+        UniqueConstraint(
+            "hackathon_id", "submitter_user_id",
+            name="uq_hackathon_submission_per_dev",
+        ),
+        Index("ix_hackathon_submission_hackathon", "hackathon_id"),
+        Index("ix_hackathon_submission_submitter", "submitter_user_id"),
+        Index("ix_hackathon_submission_audit_status", "audit_status"),
+    )
+
+
+__all__ = [
+    "Hackathon",
+    "HackathonRole",
+    "HackathonRoleType",
+    "HackathonSubmission",
+    "SubmissionStatus",
+    "AuditStatus",
+]

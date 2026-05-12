@@ -24,6 +24,7 @@ async def lifespan(app: FastAPI):
     if engine is not None:
         from app.models import issues, project  # noqa: F401
         from app.models import audit_v4_shadow  # noqa: F401
+        from app.models import hackathon  # noqa: F401
         Base.metadata.create_all(bind=engine)
     else:
         logging.warning("DATABASE_URL not set - skipping table creation")
@@ -67,6 +68,8 @@ from app.routes.v4_diagnostic import router as v4_diagnostic_router
 app.include_router(v4_diagnostic_router)
 from app.routes import profile
 app.include_router(profile.router)
+from app.routes import hackathons
+app.include_router(hackathons.router)
 
 
 @app.get("/")
