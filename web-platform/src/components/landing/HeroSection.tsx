@@ -556,7 +556,7 @@ export function HeroSection({ totalIssues: initialTotalIssues }: { totalIssues?:
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: 0.2 }}
-                    className="text-base sm:text-lg text-muted-foreground mb-10 text-center max-w-2xl leading-relaxed"
+                    className="text-base sm:text-lg text-muted-foreground mb-8 text-center max-w-2xl leading-relaxed"
                 >
                     Every commit you&apos;ve ever made carries a decision.
                     We read those decisions and surface them — for you, and for the people hiring.

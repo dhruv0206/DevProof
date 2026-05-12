@@ -5,6 +5,7 @@ import { DashboardContent } from '@/components/dashboard/DashboardContent';
 import { AuthRequiredModal } from '@/components/shared/AuthRequiredModal';
 import { DualAxisHero } from '@/components/profile/DualAxisHero';
 import { ShareScoreButton } from '@/components/profile/ShareScoreButton';
+import { LiveHackathonsBanner } from '@/components/hackathons/LiveHackathonsBanner';
 
 export default async function DashboardPage() {
     const session = await auth.api.getSession({
@@ -36,6 +37,8 @@ export default async function DashboardPage() {
                     </div>
                     {githubUsername && <ShareScoreButton username={githubUsername} />}
                 </div>
+
+                <LiveHackathonsBanner />
 
                 {githubUsername && (
                     <section className="mb-8">

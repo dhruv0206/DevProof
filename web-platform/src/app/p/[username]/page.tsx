@@ -1,6 +1,7 @@
 import { Metadata } from 'next';
 import { ProfileLayout } from '@/components/profile/ProfileLayout';
 import { ProfileContent } from '@/components/profile/ProfileContent';
+import { PinnedHackathonsCard } from '@/components/hackathons/PinnedHackathonsCard';
 
 interface PageProps {
     params: Promise<{ username: string }>;
@@ -42,6 +43,7 @@ export default async function PublicProfilePage({ params }: PageProps) {
     return (
         <ProfileLayout>
             <ProfileContent username={username} />
+            <PinnedHackathonsCard username={username} />
         </ProfileLayout>
     );
 }

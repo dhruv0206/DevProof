@@ -34,6 +34,7 @@ export function LandingNavbar() {
         { name: 'How It Works', href: '#how-it-works' },
         { name: 'Features', href: '#features' },
         { name: 'Recent Scores', href: '#recent-scores' },
+        { name: 'Hackathons', href: '/hackathons' },
     ];
 
     return (

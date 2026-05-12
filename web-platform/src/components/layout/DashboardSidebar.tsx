@@ -15,6 +15,7 @@ import {
     Code,
     Linkedin,
     ShieldCheck,
+    Trophy,
 } from 'lucide-react';
 import { useSession, signIn, signOut } from '@/lib/auth-client';
 import { useSidebar } from '@/components/layout/SidebarContext';
@@ -46,6 +47,11 @@ const menuItems = [
         name: 'Projects',
         icon: Code,
         href: '/projects',
+    },
+    {
+        name: 'Hackathons',
+        icon: Trophy,
+        href: '/hackathons',
     },
     {
         name: 'Profile',
