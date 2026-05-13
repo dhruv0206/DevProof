@@ -21,6 +21,8 @@ import time
 from dataclasses import asdict
 from typing import Any, Optional
 
+import logfire
+
 from devproof_ranking_algo import (
     GithubIngestor,
     TarballFetcher,
@@ -165,6 +167,20 @@ async def run_v4(
         cached_tagger_result is not None and cached_map_result is not None
     )
 
+    # Logfire: emit one info-level event marking the audit start so per-audit
+    # traces are easy to find by repo_url in the dashboard. Per-stage spans
+    # below carry the same repo_url attribute so they're filterable together.
+    # No-op when LOGFIRE_TOKEN is unset.
+    logfire.info(
+        "v4.audit.start",
+        repo_url=repo_url,
+        github_username=github_username or "",
+        pipeline_version=pipeline_version,
+        hackathon_mode=hackathon_mode,
+        run_full_pipeline=run_full_pipeline,
+        cache_reused_intermediates=have_cached_intermediates,
+    )
+
     result: dict[str, Any] = {
         "repo_url": repo_url,
         "commit_sha": None,
@@ -288,16 +304,27 @@ async def run_v4(
     ownership_result = None
     if github_username and repo_obj is not None:
         t0 = time.perf_counter()
-        try:
-            ownership_result = compute_ownership(
-                repo_obj,
-                github_username,
-                importance_ranked_files=top_20_paths[:_OWNERSHIP_TOP_N] or None,
-            )
-            result["ownership"] = _ownership_to_dict(ownership_result)
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"ownership: {e}")
-            log.warning("[v4-shadow] ownership failed: %s", e)
+        with logfire.span(
+            "v4.ownership",
+            repo_url=repo_url,
+            github_username=github_username,
+        ) as _own_span:
+            try:
+                ownership_result = compute_ownership(
+                    repo_obj,
+                    github_username,
+                    importance_ranked_files=top_20_paths[:_OWNERSHIP_TOP_N] or None,
+                )
+                result["ownership"] = _ownership_to_dict(ownership_result)
+                _own_span.set_attribute("score", ownership_result.score)
+                _own_span.set_attribute(
+                    "burst_severity",
+                    (ownership_result.evidence or {}).get("burst_severity", "none"),
+                )
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"ownership: {e}")
+                log.warning("[v4-shadow] ownership failed: %s", e)
+                _own_span.set_attribute("error", str(e))
         latency["ownership"] = int((time.perf_counter() - t0) * 1000)
 
     # 10. Full pipeline (tagger + map + reduce + optional verify)
@@ -315,85 +342,124 @@ async def run_v4(
             # 10a. Tagger — skip if cached intermediates supplied
             t0 = time.perf_counter()
             tagger_result = None
-            if have_cached_intermediates:
-                tagger_result = cached_tagger_result
-                log.info("[v4-shadow] tagger: reusing cached result (%d tags)",
-                         len(tagger_result.tags))
-            else:
-                try:
-                    tagger_result = await tagger.tag_all(file_map, graph, client)
-                except Exception as e:  # noqa: BLE001
-                    errors.append(f"tag: {e}")
-                    log.warning("[v4-shadow] tagger failed: %s", e)
+            with logfire.span(
+                "v4.tagger",
+                repo_url=repo_url,
+                cache_hit=have_cached_intermediates,
+                file_count=len(file_map),
+            ) as _tag_span:
+                if have_cached_intermediates:
+                    tagger_result = cached_tagger_result
+                    log.info("[v4-shadow] tagger: reusing cached result (%d tags)",
+                             len(tagger_result.tags))
+                else:
+                    try:
+                        tagger_result = await tagger.tag_all(file_map, graph, client)
+                    except Exception as e:  # noqa: BLE001
+                        errors.append(f"tag: {e}")
+                        log.warning("[v4-shadow] tagger failed: %s", e)
+                        _tag_span.set_attribute("error", str(e))
+                if tagger_result is not None:
+                    _tag_span.set_attribute("tag_count", len(tagger_result.tags))
             latency["tag"] = int((time.perf_counter() - t0) * 1000)
 
             # 10b. Map phase — skip if cached intermediates supplied
             t0 = time.perf_counter()
             map_result = None
-            if have_cached_intermediates:
-                map_result = cached_map_result
-                log.info("[v4-shadow] map: reusing cached result (%d chunks)",
-                         len(map_result.chunks))
-            elif tagger_result is not None:
-                try:
-                    file_tags = {t.file_path: t for t in tagger_result.tags}
-                    map_result = await map_phase.run(
-                        imp.core_set,
-                        file_map,
-                        graph,
-                        client,
-                        file_tags=file_tags,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    errors.append(f"map: {e}")
-                    log.warning("[v4-shadow] map failed: %s", e)
+            with logfire.span(
+                "v4.map",
+                repo_url=repo_url,
+                cache_hit=have_cached_intermediates,
+                core_set_size=len(imp.core_set),
+            ) as _map_span:
+                if have_cached_intermediates:
+                    map_result = cached_map_result
+                    log.info("[v4-shadow] map: reusing cached result (%d chunks)",
+                             len(map_result.chunks))
+                elif tagger_result is not None:
+                    try:
+                        file_tags = {t.file_path: t for t in tagger_result.tags}
+                        map_result = await map_phase.run(
+                            imp.core_set,
+                            file_map,
+                            graph,
+                            client,
+                            file_tags=file_tags,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        errors.append(f"map: {e}")
+                        log.warning("[v4-shadow] map failed: %s", e)
+                        _map_span.set_attribute("error", str(e))
+                if map_result is not None:
+                    _map_span.set_attribute("chunk_count", len(map_result.chunks))
             latency["map"] = int((time.perf_counter() - t0) * 1000)
 
             # 10c. Reduce
             t0 = time.perf_counter()
             v4_output = None
-            if tagger_result is not None and map_result is not None:
-                try:
-                    v4_output = await reduce_phase.reduce(
-                        repo_url=repo_url,
-                        commit_sha=result.get("commit_sha"),
-                        applicant_username=github_username,
-                        file_map=file_map,
-                        graph=graph,
-                        importance=imp,
-                        patterns=detected_patterns,
-                        ownership=ownership_result,
-                        tagger_result=tagger_result,
-                        map_phase_result=map_result,
-                        gemini_client=client,
-                        hackathon_mode=hackathon_mode,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    # reduce_phase has its own fallback; this guards truly
-                    # uncaught exceptions (e.g. import-time bugs).
-                    errors.append(f"reduce: {e}")
-                    log.error("[v4-shadow] reduce raised uncaught: %s", e)
+            with logfire.span(
+                "v4.reduce",
+                repo_url=repo_url,
+                hackathon_mode=hackathon_mode,
+                claim_input_count=len(map_result.chunks) if map_result is not None else 0,
+            ) as _red_span:
+                if tagger_result is not None and map_result is not None:
+                    try:
+                        v4_output = await reduce_phase.reduce(
+                            repo_url=repo_url,
+                            commit_sha=result.get("commit_sha"),
+                            applicant_username=github_username,
+                            file_map=file_map,
+                            graph=graph,
+                            importance=imp,
+                            patterns=detected_patterns,
+                            ownership=ownership_result,
+                            tagger_result=tagger_result,
+                            map_phase_result=map_result,
+                            gemini_client=client,
+                            hackathon_mode=hackathon_mode,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        # reduce_phase has its own fallback; this guards truly
+                        # uncaught exceptions (e.g. import-time bugs).
+                        errors.append(f"reduce: {e}")
+                        log.error("[v4-shadow] reduce raised uncaught: %s", e)
+                        _red_span.set_attribute("error", str(e))
+                if v4_output is not None:
+                    _red_span.set_attributes({
+                        "repo_score": v4_output.repo_score,
+                        "repo_tier": v4_output.repo_tier.value,
+                        "discipline": v4_output.discipline.value,
+                        "claim_count": len(v4_output.claims),
+                    })
             latency["reduce"] = int((time.perf_counter() - t0) * 1000)
 
             # 10d. Verify — gated by flag AND low-confidence claims present.
             t0 = time.perf_counter()
             if v4_output is not None and enable_verify:
-                low_conf = any(
-                    c.confidence < _VERIFY_CONFIDENCE_THRESHOLD
-                    for c in v4_output.claims
+                low_conf_count = sum(
+                    1 for c in v4_output.claims
+                    if c.confidence < _VERIFY_CONFIDENCE_THRESHOLD
                 )
-                if low_conf:
-                    try:
-                        v4_output = await verify_phase.verify(
-                            v4_output,
-                            file_map,
-                            graph,
-                            client,
-                            confidence_threshold=_VERIFY_CONFIDENCE_THRESHOLD,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        errors.append(f"verify: {e}")
-                        log.warning("[v4-shadow] verify failed: %s", e)
+                if low_conf_count > 0:
+                    with logfire.span(
+                        "v4.verify",
+                        repo_url=repo_url,
+                        low_conf_claim_count=low_conf_count,
+                        threshold=_VERIFY_CONFIDENCE_THRESHOLD,
+                    ) as _ver_span:
+                        try:
+                            v4_output = await verify_phase.verify(
+                                v4_output,
+                                file_map,
+                                graph,
+                                client,
+                                confidence_threshold=_VERIFY_CONFIDENCE_THRESHOLD,
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            errors.append(f"verify: {e}")
+                            log.warning("[v4-shadow] verify failed: %s", e)
+                            _ver_span.set_attribute("error", str(e))
             latency["verify"] = int((time.perf_counter() - t0) * 1000)
 
             if v4_output is not None:
@@ -426,6 +492,21 @@ async def run_v4(
         "[v4-shadow] %s/%s -> succeeded=%s, total=%dms, errors=%d, full=%s, cache=%s",
         owner, repo_name, result["succeeded"], latency["total"],
         len(errors), run_full_pipeline, result["cache_reused"],
+    )
+    # Logfire end marker. Pairs with the v4.audit.start event above so a
+    # dashboard query "started but didn't complete" surfaces hangs.
+    v4_out = result.get("v4_output") or {}
+    logfire.info(
+        "v4.audit.complete",
+        repo_url=repo_url,
+        succeeded=result["succeeded"],
+        total_ms=latency["total"],
+        error_count=len(errors),
+        repo_score=v4_out.get("repo_score"),
+        repo_tier=v4_out.get("repo_tier"),
+        discipline=v4_out.get("discipline"),
+        hackathon_mode=hackathon_mode,
+        cache_reused=result["cache_reused"],
     )
     return result
 

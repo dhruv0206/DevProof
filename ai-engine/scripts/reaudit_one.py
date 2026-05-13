@@ -16,6 +16,16 @@ sys.path.insert(0, str(_AI_ENGINE_DIR))
 from dotenv import load_dotenv
 load_dotenv(_AI_ENGINE_DIR / ".env")
 
+# Configure Logfire (same setup as app/main.py) so spans from this ad-hoc
+# script also reach the dashboard. No-op when LOGFIRE_TOKEN is unset.
+import logfire
+logfire.configure(
+    service_name="devproof-ai-engine-cli",
+    service_version=os.getenv("GIT_SHA") or "dev",
+    send_to_logfire="if-token-present",
+    console=False,
+)
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 

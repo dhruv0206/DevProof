@@ -3,17 +3,34 @@
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file BEFORE other imports that need env vars
 
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 
+# ── Logfire (Pydantic) observability ──────────────────────────────────────────
+# Configure as early as possible so subsequent imports are instrumented.
+# Fails open (send_to_logfire="if-token-present") so local dev without a token
+# doesn't crash. When LOGFIRE_TOKEN is set, spans + structured logs ship to
+# https://logfire.pydantic.dev for the configured service.
+import logfire
+
+logfire.configure(
+    service_name="devproof-ai-engine",
+    service_version=os.getenv("GIT_SHA") or "dev",
+    send_to_logfire="if-token-present",
+    console=False,  # don't double-print to stdout — uvicorn already logs
+)
+
 from app.routes import search, ingest, issues, users
 
-# Setup logging
+# Setup logging — pipe stdlib logs through logfire so [v4-bg], [v4-cache] etc.
+# show up as Logfire log entries linked to their parent spans.
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logfire.LogfireLoggingHandler()],
 )
 
 # Create FastAPI app
@@ -37,6 +54,21 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Logfire — auto-instrument FastAPI routes, SQLAlchemy queries, and outbound
+# httpx calls. Each request becomes a parent span; child spans capture DB
+# queries and external HTTP traffic. No-op when LOGFIRE_TOKEN is unset.
+logfire.instrument_fastapi(app, capture_headers=False)
+try:
+    from app.database import engine as _db_engine
+    if _db_engine is not None:
+        logfire.instrument_sqlalchemy(engine=_db_engine)
+except Exception as _e:  # pragma: no cover - defensive
+    logging.warning("logfire.instrument_sqlalchemy failed: %s", _e)
+try:
+    logfire.instrument_httpx()
+except Exception as _e:  # pragma: no cover - defensive
+    logging.warning("logfire.instrument_httpx failed: %s", _e)
 
 # CORS middleware for frontend
 # When allow_credentials=True, allow_origins cannot be ["*"]
