@@ -49,6 +49,26 @@ _OWNERSHIP_TOP_N = 20
 # Default: verify only claims below this confidence. Mirrors verify_phase default.
 _VERIFY_CONFIDENCE_THRESHOLD = 0.70
 
+# ── Model selection — overridable via env var per stage ─────────────────────
+# Defaults reflect the post-2026-05-12 stack:
+#   Tagger : Gemini 3.1 Flash-Lite stable (volume + cost floor)
+#   Map    : GLM 5.1 (code-judgment quality, +4pt SWE-Bench Pro)
+#   Reduce : GLM 5.1 (long-horizon synthesis)
+#   Verify : Gemini 3.1 Pro customtools (tool-calling, working)
+import os as _os  # noqa: E402
+
+DEFAULT_TAGGER_MODEL  = _os.getenv("V4_TAGGER_MODEL",  "gemini-3.1-flash-lite")
+DEFAULT_MAP_MODEL     = _os.getenv("V4_MAP_MODEL",     "gemini-3-flash-preview")
+DEFAULT_REDUCE_MODEL  = _os.getenv("V4_REDUCE_MODEL",  "gemini-3.1-pro-preview")
+DEFAULT_VERIFY_MODEL  = _os.getenv("V4_VERIFY_MODEL",  "gemini-3.1-pro-preview-customtools")
+# Note: 2026-05-12 A/B test compared all-Gemini vs Map+Reduce on glm-5.1.
+# Result: GLM 5.1 produced chaotic scores (real-engineering repo dropped 7pt
+# while 1-commit dump JUMPED 19pt — wrong direction) AND was ~4× slower per
+# audit. Reverted to all-Gemini defaults. Z.ai client + model_id env-var
+# infrastructure kept in place so we can re-evaluate later with prompt
+# tuning for non-Gemini models. See diagnostic/dhruv0206_audit_review/
+# model_swap_baseline.json + model_swap_new.json for the data.
+
 
 def _parse_owner_repo(repo_url: str) -> Optional[tuple[str, str]]:
     """Extract (owner, repo). Returns None on invalid input."""
@@ -354,11 +374,15 @@ async def run_v4(
                              len(tagger_result.tags))
                 else:
                     try:
-                        tagger_result = await tagger.tag_all(file_map, graph, client)
+                        tagger_result = await tagger.tag_all(
+                            file_map, graph, client,
+                            model_id=DEFAULT_TAGGER_MODEL,
+                        )
                     except Exception as e:  # noqa: BLE001
                         errors.append(f"tag: {e}")
                         log.warning("[v4-shadow] tagger failed: %s", e)
                         _tag_span.set_attribute("error", str(e))
+                _tag_span.set_attribute("model_id", DEFAULT_TAGGER_MODEL)
                 if tagger_result is not None:
                     _tag_span.set_attribute("tag_count", len(tagger_result.tags))
             latency["tag"] = int((time.perf_counter() - t0) * 1000)
@@ -385,6 +409,7 @@ async def run_v4(
                             graph,
                             client,
                             file_tags=file_tags,
+                            model_id=DEFAULT_MAP_MODEL,
                         )
                     except Exception as e:  # noqa: BLE001
                         errors.append(f"map: {e}")
@@ -392,6 +417,7 @@ async def run_v4(
                         _map_span.set_attribute("error", str(e))
                 if map_result is not None:
                     _map_span.set_attribute("chunk_count", len(map_result.chunks))
+                _map_span.set_attribute("model_id", DEFAULT_MAP_MODEL)
             latency["map"] = int((time.perf_counter() - t0) * 1000)
 
             # 10c. Reduce
@@ -417,6 +443,7 @@ async def run_v4(
                             tagger_result=tagger_result,
                             map_phase_result=map_result,
                             gemini_client=client,
+                            model_id=DEFAULT_REDUCE_MODEL,
                             hackathon_mode=hackathon_mode,
                         )
                     except Exception as e:  # noqa: BLE001
@@ -431,6 +458,7 @@ async def run_v4(
                         "repo_tier": v4_output.repo_tier.value,
                         "discipline": v4_output.discipline.value,
                         "claim_count": len(v4_output.claims),
+                        "model_id": DEFAULT_REDUCE_MODEL,
                     })
             latency["reduce"] = int((time.perf_counter() - t0) * 1000)
 
