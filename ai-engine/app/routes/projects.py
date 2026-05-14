@@ -9,12 +9,13 @@ from app.models.user import User
 from app.models.audit_cache import AuditCache
 from app.models.audit_v4_shadow import AuditV4Shadow
 from app.services.cache_service import AuditCacheService, get_repo_code_hash
-from app.services.v4_shadow_runner import run_v4, run_v4_cached
+from app.services.v4_shadow_runner import run_v4, run_v4_cached, run_v4_with_variance
 from app.middleware.rate_limit import scan_limiter, audit_limiter
 from app.config import get_settings
 from devproof_ranking_algo import AuditService
 import asyncio
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -85,6 +86,7 @@ def _run_v4_primary_background(
     project_id: str,
     repo_url: str,
     applicant_username: str | None,
+    variance_samples: int = 1,
 ) -> None:
     """Background task: run V4 and populate Project + ProjectAudit.
 
@@ -92,6 +94,13 @@ def _run_v4_primary_background(
     empty Project+Audit rows and returns ``status: pending`` immediately;
     this task fills them in. Frontend polls ``/status/{project_id}`` until
     v4_ready flips true.
+
+    ``variance_samples`` controls LLM-variance dampening. When > 1, we run
+    the pipeline that many times in parallel via ``run_v4_with_variance``
+    and return the median score + confidence label. Used for paid-tier
+    audits where ±15pt LLM swings are unacceptable. Set globally via the
+    ``V4_DEFAULT_VARIANCE_SAMPLES`` env var (default 1 = free tier, no
+    dampening; 3 = standard paid tier).
 
     On success:
     - Project: is_verified=True, verification_status=VERIFIED, authorship_percent
@@ -107,17 +116,33 @@ def _run_v4_primary_background(
         return
 
     try:
-        payload = asyncio.run(
-            run_v4_cached(
-                repo_url,
-                github_username=applicant_username,
-                db_session_factory=SessionLocal,
-                run_full_pipeline=True,
-                enable_verify=False,
+        if variance_samples > 1:
+            log.info(
+                "[v4-bg] variance mode: running %d samples for %s",
+                variance_samples, repo_url,
             )
-        )
+            payload = asyncio.run(
+                run_v4_with_variance(
+                    repo_url,
+                    github_username=applicant_username,
+                    db_session_factory=SessionLocal,
+                    samples=variance_samples,
+                    run_full_pipeline=True,
+                    enable_verify=False,
+                )
+            )
+        else:
+            payload = asyncio.run(
+                run_v4_cached(
+                    repo_url,
+                    github_username=applicant_username,
+                    db_session_factory=SessionLocal,
+                    run_full_pipeline=True,
+                    enable_verify=False,
+                )
+            )
     except Exception as e:  # noqa: BLE001 — ultimate belt-and-braces
-        log.error("[v4-bg] run_v4_cached raised: %s", e)
+        log.error("[v4-bg] V4 pipeline raised: %s", e)
         _mark_project_rejected(project_id, f"pipeline error: {e}")
         return
 
@@ -398,12 +423,17 @@ async def import_project(
 
     # 2. Kick off V4 pipeline in the background. All downstream work
     # (authorship, scoring, tags) happens inside this task.
+    # ``V4_DEFAULT_VARIANCE_SAMPLES`` env var: 1 = free tier (single sample,
+    # ~$1, ±15pt LLM variance), 3 = standard paid tier (median-of-3, ~$3,
+    # ±5-7pt residual variance), 5 = high-assurance (~$5, ±3-5pt).
+    variance_samples = int(os.environ.get("V4_DEFAULT_VARIANCE_SAMPLES", "1"))
     background_tasks.add_task(
         _run_v4_primary_background,
         str(audit.id),
         str(project.id),
         req.repo_url,
         applicant_username,
+        variance_samples,
     )
     log.info(
         "[v4] enqueued primary audit for project_id=%s audit_id=%s",

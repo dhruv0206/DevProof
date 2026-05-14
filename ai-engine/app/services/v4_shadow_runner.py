@@ -15,6 +15,7 @@ exceptions are caught, logged, and surfaced in the output dict.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -680,3 +681,256 @@ async def run_v4_cached(
         result.pop("_intermediates", None)
 
     return result
+
+
+async def run_v4_with_variance(
+    repo_url: str,
+    github_username: Optional[str],
+    db_session_factory,
+    *,
+    samples: int = 3,
+    run_full_pipeline: bool = True,
+    enable_verify: bool = False,
+    hackathon_mode: bool = False,
+) -> dict[str, Any]:
+    """Run V4 N times in parallel, return median + spread + confidence.
+
+    LLM non-determinism produces ±5-20pt swings across runs of the same repo.
+    For paying customers we run N samples and surface median + p25/p75 +
+    a confidence label so the score reported is trustworthy.
+
+    Cache strategy (this is subtle):
+      1. Tier-2 cache is checked FIRST. If a previous variance-dampened
+         median is cached, return it instantly (already trustworthy).
+      2. All N samples bypass cache reads/writes — they go through ``run_v4``
+         directly (NOT ``run_v4_cached``). This prevents the race where 3
+         parallel cache writes end up storing 1 random sample's score.
+      3. After all samples complete, the CANONICAL (audit closest to median)
+         is written to tier-2. Future re-audits of (repo, applicant) get the
+         variance-dampened answer for free.
+      4. The canonical's tagger+map intermediates are written to tier-1 so
+         other applicants auditing the same commit skip the expensive
+         Flash stages.
+
+    Returns:
+        Dict with the same shape as ``run_v4_cached`` PLUS top-level
+        ``variance`` field:
+            samples:       int (N requested)
+            n_valid:       int (how many actually succeeded)
+            raw_scores:    list[int] (sorted)
+            median:        int (canonical score)
+            p25/p75:       int
+            spread:        int (max - min)
+            confidence:    "high" | "medium" | "low" | "failed"
+        The top-level ``v4_output`` is the audit whose score is closest to
+        the median (the canonical sample returned).
+    """
+    if samples <= 1:
+        return await run_v4_cached(
+            repo_url,
+            github_username=github_username,
+            db_session_factory=db_session_factory,
+            run_full_pipeline=run_full_pipeline,
+            enable_verify=enable_verify,
+            hackathon_mode=hackathon_mode,
+        )
+
+    # Lazy imports — keeps unit tests that patch run_v4 lightweight.
+    from app.services.cache_service import get_repo_code_hash
+    from app.services.v4_cache_service import V4CacheService, V4CodeCacheService
+
+    # Step 1: code_hash + tier-2 cache check. Return immediately if a previous
+    # variance-dampened median is already cached for this (repo, applicant).
+    code_hash: Optional[str] = None
+    try:
+        ingestor = GithubIngestor()
+        code_hash = get_repo_code_hash(ingestor, repo_url)
+    except Exception as e:  # noqa: BLE001
+        log.warning("[v4-variance] code_hash compute failed, bypassing cache: %s", e)
+
+    if code_hash and github_username and not hackathon_mode:
+        try:
+            with db_session_factory() as db:
+                cached_output = V4CacheService.get(
+                    db, repo_url, code_hash, github_username,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("[v4-variance] tier2 read failed: %s", e)
+            cached_output = None
+
+        if cached_output is not None:
+            log.info(
+                "[v4-variance] tier2 HIT (variance-dampened median already cached) %s / %s",
+                repo_url, github_username,
+            )
+            # Pull previously-stored variance metadata if it exists on the cached
+            # output (set by put() below for variance audits). Fall back to a
+            # single-sample shape if this is a legacy cache row.
+            stored_variance = (cached_output.get("pipeline_meta") or {}).get("variance") or {
+                "samples": 1,
+                "n_valid": 1,
+                "raw_scores": [cached_output.get("repo_score")],
+                "median": cached_output.get("repo_score"),
+                "p25": cached_output.get("repo_score"),
+                "p75": cached_output.get("repo_score"),
+                "spread": 0,
+                "confidence": "cached-legacy",
+            }
+            return {
+                "repo_url": repo_url,
+                "commit_sha": None,
+                "pipeline_version": "v4-variance-cached",
+                "latency_ms": {"total": 0, "cache_lookup": 0},
+                "graph_stats": None,
+                "importance": None,
+                "patterns": [],
+                "ownership": None,
+                "v4_output": cached_output,
+                "errors": [],
+                "succeeded": True,
+                "cache_reused": {"tagger": True, "map": True, "tier2": True},
+                "code_hash": code_hash,
+                "variance": stored_variance,
+            }
+
+    # Step 2: read tier-1 intermediates once (applicant-agnostic). All N samples
+    # SHARE the same tagger+map output. That's not just an optimization — it
+    # means variance only comes from the Reduce LLM call (the actual source of
+    # the ±15pt swing). Tagger/Map produce stable structured signals.
+    cached_tagger, cached_map = None, None
+    if code_hash:
+        try:
+            with db_session_factory() as db:
+                tier1_hit = V4CodeCacheService.get(db, repo_url, code_hash)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[v4-variance] tier1 read failed: %s", e)
+            tier1_hit = None
+
+        if tier1_hit is not None:
+            cached_tagger, cached_map = tier1_hit
+            log.info("[v4-variance] tier1 HIT — sharing tagger+map across %d samples", samples)
+
+    # Step 3: run N samples in parallel. Use run_v4 directly (NOT run_v4_cached)
+    # so each sample bypasses cache writes. Pass cached intermediates so all
+    # samples use the same tagger+map output.
+    async def _one_sample(sample_idx: int) -> dict[str, Any]:
+        try:
+            return await run_v4(
+                repo_url,
+                github_username,
+                run_full_pipeline=run_full_pipeline,
+                enable_verify=enable_verify,
+                cached_tagger_result=cached_tagger,
+                cached_map_result=cached_map,
+                return_intermediates=(sample_idx == 0),  # only first sample
+                hackathon_mode=hackathon_mode,
+            )
+        except Exception as e:  # noqa: BLE001 — defensive
+            log.exception("[v4-variance] sample %d raised: %s", sample_idx, e)
+            return {"succeeded": False, "errors": [f"sample_raised: {e}"]}
+
+    audits = await asyncio.gather(*[_one_sample(i) for i in range(samples)])
+
+    valid_audits = [
+        a for a in audits
+        if isinstance(a, dict)
+        and a.get("succeeded")
+        and (a.get("v4_output") or {}).get("repo_score") is not None
+    ]
+    if not valid_audits:
+        return {
+            "repo_url": repo_url,
+            "succeeded": False,
+            "errors": ["variance_run_no_valid_samples"],
+            "variance": {
+                "samples": samples,
+                "n_valid": 0,
+                "raw_scores": [],
+                "median": None,
+                "p25": None, "p75": None, "spread": None,
+                "confidence": "failed",
+            },
+        }
+
+    # Step 4: compute median + quantiles + confidence label.
+    scores = sorted(
+        (a.get("v4_output") or {}).get("repo_score") for a in valid_audits
+    )
+    median = scores[len(scores) // 2]
+    p25 = scores[max(0, len(scores) // 4)]
+    p75 = scores[min(len(scores) - 1, (3 * len(scores)) // 4)]
+    spread = scores[-1] - scores[0]
+
+    if spread < 5:
+        confidence = "high"
+    elif spread < 12:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    variance_meta = {
+        "samples": samples,
+        "n_valid": len(valid_audits),
+        "raw_scores": scores,
+        "median": median,
+        "p25": p25,
+        "p75": p75,
+        "spread": spread,
+        "confidence": confidence,
+    }
+
+    # Step 5: pick canonical sample (closest to median) and embed variance.
+    canonical = min(
+        valid_audits,
+        key=lambda a: abs((a.get("v4_output") or {}).get("repo_score", 0) - median),
+    )
+    canonical = dict(canonical)
+    canonical["variance"] = variance_meta
+
+    # Step 6: write canonical to tier-2 (variance-dampened median is now cached).
+    # Stamp variance onto pipeline_meta so re-reads from cache surface it.
+    canonical_v4 = dict(canonical.get("v4_output") or {})
+    if canonical_v4:
+        pm = dict(canonical_v4.get("pipeline_meta") or {})
+        pm["variance"] = variance_meta
+        canonical_v4["pipeline_meta"] = pm
+        canonical["v4_output"] = canonical_v4
+
+        if code_hash and github_username and not hackathon_mode:
+            try:
+                with db_session_factory() as db:
+                    V4CacheService.put(
+                        db, repo_url, code_hash, github_username, canonical_v4,
+                    )
+                log.info(
+                    "[v4-variance] tier2 wrote canonical median=%s spread=%s confidence=%s",
+                    median, spread, confidence,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("[v4-variance] tier2 write failed: %s", e)
+
+    # Step 7: write tier-1 intermediates from sample 0 (where we kept them).
+    # All samples shared the same tagger+map anyway so any sample's intermediates
+    # would do; sample 0 is just where we set return_intermediates=True.
+    intermediates = (audits[0] if audits else {}).pop("_intermediates", None) if isinstance(audits[0], dict) else None
+    if code_hash and intermediates:
+        fresh_tagger = intermediates.get("tagger_result")
+        fresh_map = intermediates.get("map_result")
+        if fresh_tagger is not None and fresh_map is not None:
+            try:
+                with db_session_factory() as db:
+                    V4CodeCacheService.put(
+                        db, repo_url, code_hash, fresh_tagger, fresh_map,
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning("[v4-variance] tier1 write failed: %s", e)
+
+    # Clean up internal intermediates from all samples before returning
+    for a in audits:
+        if isinstance(a, dict):
+            a.pop("_intermediates", None)
+    canonical.pop("_intermediates", None)
+
+    canonical["code_hash"] = code_hash
+    canonical["cache_reused"] = {"tagger": cached_tagger is not None, "map": cached_map is not None, "tier2": False}
+    return canonical
