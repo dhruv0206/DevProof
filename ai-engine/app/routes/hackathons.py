@@ -3230,6 +3230,13 @@ def judge_context(
             "repo_score": score,
             "repo_tier": tier,
             "submitted_at": _isoformat(s.submitted_at),
+            # New first-class fields so the collapsed judge card can show
+            # what the project IS (one-liner) without needing a separate
+            # detail fetch per card.
+            "tagline": s.tagline,
+            "team_name": s.team_name,
+            "demo_url": s.demo_url,
+            "what_it_does": s.what_it_does,
         })
 
     return {
@@ -3241,6 +3248,79 @@ def judge_context(
         },
         "submissions": sub_payload,
     }
+
+
+@router.get("/{slug}/judge/{token}/submissions/{submission_id}/details")
+def judge_submission_details(
+    slug: str,
+    token: str,
+    submission_id: str,
+    db: Session = Depends(get_db),
+):
+    """Token-gated full audit detail for one submission.
+
+    Drives the "expand for details" toggle on the judge view: returns the
+    same shape the organizer's /admin/submissions/{id}/full endpoint
+    returns (claims, architecture, skills, score breakdown, etc.), so
+    judges can dig into a project's audit without leaving the judge
+    surface.
+
+    No DevProof auth — the judge link token IS the credential. Same
+    threat model as judge_context. Sponsor evidence respects the
+    organizer's show_sponsor_evidence toggle: when off, the response
+    still contains the audit but sponsor file:line refs are omitted.
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    if h.judge_link_token is None or h.judge_link_token != token:
+        raise HTTPException(
+            status_code=404,
+            detail="Judge link is invalid or has been regenerated",
+        )
+
+    try:
+        sub_uuid = uuid.UUID(submission_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    sub = db.query(HackathonSubmission).filter(
+        HackathonSubmission.id == sub_uuid,
+        HackathonSubmission.hackathon_id == h.id,
+    ).first()
+    if sub is None:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    audit = (
+        db.query(ProjectAudit).filter(ProjectAudit.project_id == sub.project_id).first()
+        if sub.project_id else None
+    )
+
+    # Reuse the same read-side assembler the organizer view uses — single
+    # source of truth for what an "audit detail" payload looks like across
+    # hackathon surfaces.
+    from app.services.hackathon_audit_view import build_admin_submission_view
+    view = build_admin_submission_view(submission=sub, audit=audit, hackathon=h)
+
+    # Surface the new first-class fields (the admin view returns extras +
+    # team_members; the judge UI wants tagline / what_it_does / demo_url /
+    # team_name explicitly too).
+    view["submission"].update({
+        "tagline": sub.tagline,
+        "what_it_does": sub.what_it_does,
+        "demo_url": sub.demo_url,
+        "team_name": sub.team_name,
+        "github_url": sub.github_url,
+    })
+
+    # Submitter username (judges may not be DevProof users, so we resolve
+    # the username here rather than relying on the client to do a lookup).
+    submitter_user = db.query(User).filter(User.id == sub.submitter_user_id).first()
+    view["submitter"] = {
+        "user_id": sub.submitter_user_id,
+        "username": submitter_user.githubUsername if submitter_user else None,
+        "name": submitter_user.name if submitter_user else None,
+    }
+
+    return view
 
 
 @router.get("/{slug}/judge/{token}/scores")

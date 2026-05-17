@@ -33,6 +33,40 @@ interface Submission {
     repo_score: number | null;
     repo_tier: string | null;
     submitted_at: string | null;
+    // New first-class fields, populated when the backend has been updated.
+    // Optional so older payloads still typecheck.
+    tagline?: string | null;
+    team_name?: string | null;
+    demo_url?: string | null;
+    what_it_does?: string | null;
+}
+
+// Shape returned by /judge/{token}/submissions/{id}/details — same shape
+// as the organizer-side full view. Kept narrow to what the judge UI
+// actually renders.
+interface JudgeSubmissionDetails {
+    submission: {
+        submission_id: string;
+        github_url: string;
+        tagline: string | null;
+        what_it_does: string | null;
+        demo_url: string | null;
+        team_name: string | null;
+        team_members: string[];
+        extras: Record<string, unknown>;
+    };
+    submitter?: {
+        user_id: string;
+        username: string | null;
+        name: string | null;
+    };
+    audit: {
+        v4_score: number | null;
+        v4_tier: string | null;
+        v4_output: Record<string, unknown> | null;
+    };
+    show_sponsor_evidence: boolean;
+    sponsor_evidence: Record<string, unknown[]> | null;
 }
 
 interface Props {
@@ -374,6 +408,8 @@ export function JudgeScoringClient({
                                         updateLocal(s.submission_id, patch)
                                     }
                                     onSave={() => save(s.submission_id)}
+                                    slug={slug}
+                                    token={token}
                                 />
                             </li>
                         ))}
@@ -536,12 +572,48 @@ function SubmissionCard({
     my,
     onChange,
     onSave,
+    slug,
+    token,
 }: {
     submission: Submission;
     my: MyScore | undefined;
     onChange: (patch: Partial<MyScore>) => void;
     onSave: () => void;
+    slug: string;
+    token: string;
 }) {
+    const [detailsOpen, setDetailsOpen] = useState(false);
+    const [details, setDetails] = useState<JudgeSubmissionDetails | null>(null);
+    const [detailsLoading, setDetailsLoading] = useState(false);
+    const [detailsError, setDetailsError] = useState<string | null>(null);
+
+    const toggleDetails = async () => {
+        if (detailsOpen) {
+            setDetailsOpen(false);
+            return;
+        }
+        setDetailsOpen(true);
+        if (details || detailsLoading) return;
+        setDetailsLoading(true);
+        setDetailsError(null);
+        try {
+            const res = await fetch(
+                `/api/hackathons-proxy/${encodeURIComponent(slug)}/judge/${encodeURIComponent(token)}/submissions/${encodeURIComponent(submission.submission_id)}/details`,
+                { cache: 'no-store' },
+            );
+            if (!res.ok) {
+                setDetailsError(`Could not load details (HTTP ${res.status}).`);
+                return;
+            }
+            const body = (await res.json()) as JudgeSubmissionDetails;
+            setDetails(body);
+        } catch {
+            setDetailsError('Network error loading details.');
+        } finally {
+            setDetailsLoading(false);
+        }
+    };
+
     if (!my) return null;
 
     const repoShort = submission.github_url.replace('https://github.com/', '');
@@ -549,6 +621,15 @@ function SubmissionCard({
     const extrasEntries = Object.entries(submission.extras ?? {}).filter(
         ([, v]) => v !== null && v !== '',
     );
+    const videoUrl =
+        typeof submission.extras?.demo_video_url === 'string'
+            ? (submission.extras.demo_video_url as string)
+            : null;
+    const demoUrl =
+        submission.demo_url ??
+        (typeof submission.extras?.deployed_url === 'string'
+            ? (submission.extras.deployed_url as string)
+            : null);
 
     return (
         <div
@@ -596,6 +677,36 @@ function SubmissionCard({
                 </span>
             </div>
 
+            {/* Tagline + team name (new first-class fields, 2026-05-17). Always
+             * shown when present — they're 1-liners and help the judge get
+             * context without expanding. */}
+            {submission.team_name && (
+                <div
+                    style={{
+                        fontSize: 11,
+                        color: CLAY,
+                        letterSpacing: '0.04em',
+                        marginBottom: 4,
+                    }}
+                >
+                    {submission.team_name}
+                </div>
+            )}
+            {submission.tagline && (
+                <p
+                    style={{
+                        fontSize: 13,
+                        color: '#EDEDED',
+                        lineHeight: 1.5,
+                        marginBottom: 10,
+                        fontFamily:
+                            'ui-sans-serif, system-ui, -apple-system, sans-serif',
+                    }}
+                >
+                    {submission.tagline}
+                </p>
+            )}
+
             <a
                 href={submission.github_url}
                 target="_blank"
@@ -605,12 +716,46 @@ function SubmissionCard({
                     color: '#A1A1A1',
                     wordBreak: 'break-all',
                     display: 'block',
-                    marginBottom: 14,
+                    marginBottom: (videoUrl || demoUrl) ? 6 : 14,
                     textDecoration: 'underline',
                 }}
             >
                 {repoShort} ↗
             </a>
+
+            {/* Demo + video links — shown inline below the repo so judges
+             * can click straight through without expanding. */}
+            {(videoUrl || demoUrl) && (
+                <div
+                    style={{
+                        display: 'flex',
+                        gap: 14,
+                        marginBottom: 14,
+                        fontSize: 12,
+                    }}
+                >
+                    {demoUrl && (
+                        <a
+                            href={demoUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: CLAY, textDecoration: 'underline' }}
+                        >
+                            Live demo ↗
+                        </a>
+                    )}
+                    {videoUrl && (
+                        <a
+                            href={videoUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: CLAY, textDecoration: 'underline' }}
+                        >
+                            Video ↗
+                        </a>
+                    )}
+                </div>
+            )}
 
             {/* V4 audit score */}
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 14 }}>
@@ -631,6 +776,37 @@ function SubmissionCard({
                 </span>
                 {submission.repo_score !== null && (
                     <span style={{ fontSize: 12, color: TEXT_DIM }}>/100</span>
+                )}
+            </div>
+
+            {/* View details — lazy-loaded audit detail (claims, architecture,
+             * skills, score breakdown). Hidden behind a toggle because most
+             * judges only need to dig in occasionally; the always-visible
+             * fields above cover the common case. */}
+            <div style={{ marginBottom: 14 }}>
+                <button
+                    type="button"
+                    onClick={toggleDetails}
+                    style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: CLAY,
+                        fontSize: 11,
+                        letterSpacing: '0.04em',
+                        cursor: 'pointer',
+                        padding: 0,
+                        fontFamily: 'inherit',
+                    }}
+                >
+                    {detailsOpen ? '▾ Hide audit details' : '▸ View audit details'}
+                </button>
+                {detailsOpen && (
+                    <DetailsPanel
+                        details={details}
+                        loading={detailsLoading}
+                        error={detailsError}
+                        whatItDoes={submission.what_it_does ?? null}
+                    />
                 )}
             </div>
 
@@ -855,6 +1031,338 @@ function SubmissionCard({
                     )}
                 </div>
             </div>
+        </div>
+    );
+}
+
+
+/**
+ * DetailsPanel — rendered inline when a judge expands a submission card.
+ * Surfaces:
+ *   • "ABOUT" paragraph (what_it_does)
+ *   • Verified claims with file:line evidence
+ *   • Architecture patterns
+ *   • Skills demonstrated
+ *   • Score breakdown (sub-scores)
+ *
+ * All read from the v4_output blob that the details endpoint returns.
+ * Loading/error states render in-place so the card doesn't jump around.
+ */
+function DetailsPanel({
+    details,
+    loading,
+    error,
+    whatItDoes,
+}: {
+    details: JudgeSubmissionDetails | null;
+    loading: boolean;
+    error: string | null;
+    whatItDoes: string | null;
+}) {
+    if (loading) {
+        return (
+            <div
+                style={{
+                    marginTop: 10,
+                    padding: '12px 14px',
+                    border: `1px dashed ${BORDER}`,
+                    fontSize: 11,
+                    color: TEXT_DIM,
+                }}
+            >
+                ⋯ loading audit details…
+            </div>
+        );
+    }
+    if (error) {
+        return (
+            <div
+                style={{
+                    marginTop: 10,
+                    padding: '12px 14px',
+                    border: '1px solid rgba(239,68,68,0.35)',
+                    background: 'rgba(239,68,68,0.06)',
+                    fontSize: 11,
+                    color: '#fca5a5',
+                }}
+            >
+                {error}
+            </div>
+        );
+    }
+    if (!details) return null;
+
+    // The V4 output blob shape is broad and partially typed elsewhere; here
+    // we narrow at the field-read level so a missing/renamed field just
+    // results in the section not rendering.
+    const v4 = (details.audit?.v4_output ?? {}) as Record<string, unknown>;
+    const claims =
+        (v4.features as Record<string, unknown>[] | undefined) ??
+        (v4.verified_features as Record<string, unknown>[] | undefined) ??
+        [];
+    const architecture =
+        (v4.architecture as Record<string, unknown>[] | undefined) ??
+        (v4.architecture_patterns as Record<string, unknown>[] | undefined) ??
+        [];
+    const skills =
+        (v4.skills as Array<string | { name?: string }> | undefined) ?? [];
+    const breakdown =
+        (v4.score_breakdown as Record<string, number> | undefined) ?? null;
+
+    return (
+        <div
+            style={{
+                marginTop: 12,
+                padding: '14px 16px',
+                border: `1px solid ${BORDER}`,
+                background: 'rgba(255,255,255,0.015)',
+            }}
+        >
+            {/* ABOUT */}
+            {whatItDoes && (
+                <DetailSection label="ABOUT">
+                    <p
+                        style={{
+                            fontSize: 12.5,
+                            color: '#A1A1A1',
+                            lineHeight: 1.55,
+                            whiteSpace: 'pre-wrap',
+                            margin: 0,
+                            fontFamily:
+                                'ui-sans-serif, system-ui, -apple-system, sans-serif',
+                        }}
+                    >
+                        {whatItDoes}
+                    </p>
+                </DetailSection>
+            )}
+
+            {/* SCORE BREAKDOWN */}
+            {breakdown && Object.keys(breakdown).length > 0 && (
+                <DetailSection label="SCORE_BREAKDOWN">
+                    <div
+                        style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+                            gap: 8,
+                            fontSize: 12,
+                        }}
+                    >
+                        {Object.entries(breakdown).map(([k, v]) => (
+                            <div
+                                key={k}
+                                style={{
+                                    padding: '6px 8px',
+                                    border: `1px solid ${BORDER}`,
+                                    background: 'rgba(255,255,255,0.02)',
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        fontSize: 9,
+                                        color: TEXT_DIM,
+                                        letterSpacing: '0.06em',
+                                        textTransform: 'uppercase',
+                                    }}
+                                >
+                                    {k.replace(/_/g, ' ')}
+                                </div>
+                                <div
+                                    style={{
+                                        fontSize: 14,
+                                        color: typeof v === 'number' && v >= 70
+                                            ? CLAY
+                                            : '#EDEDED',
+                                        fontVariantNumeric: 'tabular-nums',
+                                    }}
+                                >
+                                    {typeof v === 'number' ? v.toFixed(0) : '—'}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </DetailSection>
+            )}
+
+            {/* VERIFIED CLAIMS */}
+            {claims.length > 0 && (
+                <DetailSection label={`VERIFIED_CLAIMS · ${claims.length}`}>
+                    <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                        {claims.slice(0, 12).map((c, i) => {
+                            const summary =
+                                (c.summary as string | undefined) ??
+                                (c.title as string | undefined) ??
+                                '(no summary)';
+                            const tier = c.tier as string | undefined;
+                            const files = (c.evidence_files as string[] | undefined) ?? [];
+                            const lines = (c.evidence_lines as number[] | undefined) ?? [];
+                            return (
+                                <li
+                                    key={i}
+                                    style={{
+                                        padding: '6px 0',
+                                        borderBottom: '1px solid rgba(255,255,255,0.04)',
+                                    }}
+                                >
+                                    <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                                        {tier && (
+                                            <span
+                                                style={{
+                                                    fontSize: 9,
+                                                    color: CLAY,
+                                                    letterSpacing: '0.06em',
+                                                }}
+                                            >
+                                                {tier.replace('TIER_', 'T')}
+                                            </span>
+                                        )}
+                                        <span style={{ fontSize: 12, color: '#EDEDED' }}>
+                                            {summary}
+                                        </span>
+                                    </div>
+                                    {files.length > 0 && (
+                                        <div
+                                            style={{
+                                                fontSize: 10,
+                                                color: TEXT_DIM,
+                                                fontFamily: 'ui-monospace, monospace',
+                                                marginTop: 2,
+                                                wordBreak: 'break-all',
+                                            }}
+                                        >
+                                            {files.slice(0, 3).map((f, idx) => (
+                                                <span key={idx}>
+                                                    {f}
+                                                    {lines[idx] !== undefined ? `:${lines[idx]}` : ''}
+                                                    {idx < Math.min(files.length, 3) - 1 ? ' · ' : ''}
+                                                </span>
+                                            ))}
+                                            {files.length > 3 && (
+                                                <span> +{files.length - 3} more</span>
+                                            )}
+                                        </div>
+                                    )}
+                                </li>
+                            );
+                        })}
+                    </ul>
+                    {claims.length > 12 && (
+                        <div style={{ fontSize: 11, color: TEXT_DIM, marginTop: 6 }}>
+                            // {claims.length - 12} more claims not shown
+                        </div>
+                    )}
+                </DetailSection>
+            )}
+
+            {/* ARCHITECTURE */}
+            {architecture.length > 0 && (
+                <DetailSection label="ARCHITECTURE">
+                    <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: 12 }}>
+                        {architecture.slice(0, 8).map((p, i) => (
+                            <li
+                                key={i}
+                                style={{
+                                    padding: '3px 0',
+                                    color: '#A1A1A1',
+                                }}
+                            >
+                                <span style={{ color: CLAY }}>›</span>{' '}
+                                {(p.pattern as string | undefined) ??
+                                    (p.name as string | undefined) ??
+                                    '(unnamed pattern)'}
+                            </li>
+                        ))}
+                    </ul>
+                </DetailSection>
+            )}
+
+            {/* SKILLS */}
+            {skills.length > 0 && (
+                <DetailSection label="SKILLS">
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {skills.slice(0, 30).map((sk, i) => {
+                            const name =
+                                typeof sk === 'string'
+                                    ? sk
+                                    : (sk?.name as string | undefined) ?? '';
+                            if (!name) return null;
+                            return (
+                                <span
+                                    key={i}
+                                    style={{
+                                        fontSize: 11,
+                                        padding: '3px 8px',
+                                        border: `1px solid ${BORDER}`,
+                                        color: '#EDEDED',
+                                    }}
+                                >
+                                    {name}
+                                </span>
+                            );
+                        })}
+                    </div>
+                </DetailSection>
+            )}
+
+            {/* SPONSOR EVIDENCE (gated on organizer toggle) */}
+            {details.show_sponsor_evidence &&
+                details.sponsor_evidence &&
+                Object.keys(details.sponsor_evidence).length > 0 && (
+                    <DetailSection label="SPONSOR_EVIDENCE">
+                        {Object.entries(details.sponsor_evidence).map(([sponsor, entries]) => (
+                            <div key={sponsor} style={{ marginBottom: 8 }}>
+                                <div
+                                    style={{
+                                        fontSize: 11,
+                                        color: CLAY,
+                                        letterSpacing: '0.04em',
+                                        marginBottom: 3,
+                                    }}
+                                >
+                                    {sponsor}
+                                    <span style={{ color: TEXT_DIM }}>
+                                        {' '}
+                                        · {(entries as unknown[]).length} matches
+                                    </span>
+                                </div>
+                            </div>
+                        ))}
+                    </DetailSection>
+                )}
+
+            {claims.length === 0 &&
+                architecture.length === 0 &&
+                skills.length === 0 &&
+                !breakdown && (
+                    <div style={{ fontSize: 11, color: TEXT_DIM }}>
+                        // audit blob is empty — submission may still be running
+                    </div>
+                )}
+        </div>
+    );
+}
+
+function DetailSection({
+    label,
+    children,
+}: {
+    label: string;
+    children: React.ReactNode;
+}) {
+    return (
+        <div style={{ marginBottom: 14 }}>
+            <div
+                style={{
+                    fontSize: 9,
+                    color: TEXT_DIM,
+                    letterSpacing: '0.12em',
+                    textTransform: 'uppercase',
+                    marginBottom: 6,
+                }}
+            >
+                {label}
+            </div>
+            {children}
         </div>
     );
 }
