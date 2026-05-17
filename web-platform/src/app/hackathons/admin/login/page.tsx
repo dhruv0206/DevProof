@@ -17,7 +17,7 @@
 
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { Suspense, useState, type FormEvent } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { signIn } from '@/lib/auth-client';
 import { HackathonAdminLayout } from '@/components/layout/HackathonAdminLayout';
@@ -25,7 +25,19 @@ import { HackathonAdminLayout } from '@/components/layout/HackathonAdminLayout';
 const CLAY = '#CC785C';
 const TEXT_DIM = '#666666';
 
+// Next.js 15+ requires components calling useSearchParams() to be inside a
+// Suspense boundary; otherwise prerender fails at build time. Splitting the
+// inner form out lets the outer default export provide that boundary while
+// keeping the rest of the file unchanged.
 export default function AdminLoginPage() {
+    return (
+        <Suspense fallback={null}>
+            <AdminLoginInner />
+        </Suspense>
+    );
+}
+
+function AdminLoginInner() {
     const router = useRouter();
     const params = useSearchParams();
     const next = params.get('next') || '/hackathons/admin';
