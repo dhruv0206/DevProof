@@ -16,7 +16,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 const CLAY = '#CC785C';
 const TEXT_DIM = '#888';
@@ -92,6 +92,66 @@ export function PlatformAdminCreateButton() {
             setHackathonSlug(auto);
         }
     };
+
+    // Debounced live slug-availability check. Sequencing matters: only the
+    // result of the LATEST request should land in state — otherwise a slow
+    // earlier request can overwrite a faster later one and show wrong status.
+    // We use a monotonic request counter to discard stale responses.
+    type SlugStatus =
+        | { kind: 'idle' }
+        | { kind: 'checking' }
+        | { kind: 'available' }
+        | { kind: 'taken' }
+        | { kind: 'invalid' };
+    const [slugStatus, setSlugStatus] = useState<SlugStatus>({ kind: 'idle' });
+    const slugRequestSeq = useRef(0);
+
+    useEffect(() => {
+        const slug = hackathonSlug.trim();
+        if (!slug) {
+            setSlugStatus({ kind: 'idle' });
+            return;
+        }
+        // Cheap client-side format check before hitting the network.
+        if (slug.length < 3 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+            setSlugStatus({ kind: 'invalid' });
+            return;
+        }
+        setSlugStatus({ kind: 'checking' });
+
+        const myRequestId = ++slugRequestSeq.current;
+        const timeoutId = setTimeout(async () => {
+            try {
+                const res = await fetch(
+                    `/api/hackathons-proxy/platform-admin/check-slug?slug=${encodeURIComponent(slug)}`,
+                    { cache: 'no-store' },
+                );
+                if (myRequestId !== slugRequestSeq.current) return; // stale
+                if (!res.ok) {
+                    setSlugStatus({ kind: 'idle' });
+                    return;
+                }
+                const body = (await res.json()) as {
+                    valid: boolean;
+                    available: boolean;
+                    reason: string | null;
+                };
+                if (myRequestId !== slugRequestSeq.current) return; // stale
+                if (!body.valid) {
+                    setSlugStatus({ kind: 'invalid' });
+                } else if (body.available) {
+                    setSlugStatus({ kind: 'available' });
+                } else {
+                    setSlugStatus({ kind: 'taken' });
+                }
+            } catch {
+                if (myRequestId !== slugRequestSeq.current) return;
+                setSlugStatus({ kind: 'idle' });
+            }
+        }, 400);
+
+        return () => clearTimeout(timeoutId);
+    }, [hackathonSlug]);
 
     const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
         e.preventDefault();
@@ -276,10 +336,11 @@ export function PlatformAdminCreateButton() {
                                         placeholder="fomo-munich-2026"
                                         className="w-full rounded-md px-3 py-2 text-sm font-mono bg-transparent outline-none"
                                         style={{
-                                            border: '1px solid rgba(255,255,255,0.10)',
+                                            border: `1px solid ${slugStatusBorder(slugStatus.kind)}`,
                                             color: '#EDEDED',
                                         }}
                                     />
+                                    <SlugStatusIndicator status={slugStatus.kind} slug={hackathonSlug} />
                                 </Field>
                                 <div
                                     style={{
@@ -289,29 +350,17 @@ export function PlatformAdminCreateButton() {
                                     }}
                                 >
                                     <Field label="Starts" hint="Optional">
-                                        <input
-                                            type="datetime-local"
+                                        <DateTimeInput
                                             value={startsAt}
-                                            onChange={(e) => setStartsAt(e.target.value)}
+                                            onChange={setStartsAt}
                                             disabled={submitting}
-                                            className="w-full rounded-md px-3 py-2 text-sm bg-transparent outline-none"
-                                            style={{
-                                                border: '1px solid rgba(255,255,255,0.10)',
-                                                color: '#EDEDED',
-                                            }}
                                         />
                                     </Field>
                                     <Field label="Ends" hint="Optional">
-                                        <input
-                                            type="datetime-local"
+                                        <DateTimeInput
                                             value={endsAt}
-                                            onChange={(e) => setEndsAt(e.target.value)}
+                                            onChange={setEndsAt}
                                             disabled={submitting}
-                                            className="w-full rounded-md px-3 py-2 text-sm bg-transparent outline-none"
-                                            style={{
-                                                border: '1px solid rgba(255,255,255,0.10)',
-                                                color: '#EDEDED',
-                                            }}
                                         />
                                     </Field>
                                 </div>
@@ -348,7 +397,10 @@ export function PlatformAdminCreateButton() {
                                             submitting ||
                                             !email ||
                                             !hackathonName ||
-                                            !hackathonSlug
+                                            !hackathonSlug ||
+                                            slugStatus.kind === 'invalid' ||
+                                            slugStatus.kind === 'taken' ||
+                                            slugStatus.kind === 'checking'
                                         }
                                         className="text-xs rounded-md px-3 py-1.5 transition-opacity hover:opacity-90 disabled:opacity-50"
                                         style={{
@@ -526,4 +578,125 @@ function invitationTtlDays(iso: string): number {
     const expires = new Date(iso).getTime();
     const days = Math.round((expires - Date.now()) / (1000 * 60 * 60 * 24));
     return Math.max(1, days);
+}
+
+
+/**
+ * Inline visual feedback for the slug-availability debounced check.
+ * Renders below the slug input. Hidden when the user hasn't typed anything.
+ */
+function SlugStatusIndicator({
+    status,
+    slug,
+}: {
+    status: 'idle' | 'checking' | 'available' | 'taken' | 'invalid';
+    slug: string;
+}) {
+    if (!slug || status === 'idle') return null;
+    const base: React.CSSProperties = {
+        marginTop: 6,
+        fontSize: 11,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+    };
+    if (status === 'checking') {
+        return (
+            <div style={{ ...base, color: TEXT_DIM }}>
+                <span>⋯</span>
+                <span>checking…</span>
+            </div>
+        );
+    }
+    if (status === 'available') {
+        return (
+            <div style={{ ...base, color: '#84cc16' }}>
+                <span>✓</span>
+                <span>
+                    <code>{slug}</code> is available
+                </span>
+            </div>
+        );
+    }
+    if (status === 'taken') {
+        return (
+            <div style={{ ...base, color: '#f87171' }}>
+                <span>×</span>
+                <span>
+                    <code>{slug}</code> is already taken — pick another
+                </span>
+            </div>
+        );
+    }
+    // invalid
+    return (
+        <div style={{ ...base, color: '#f87171' }}>
+            <span>×</span>
+            <span>must be 3+ chars, lowercase letters/numbers/hyphens only</span>
+        </div>
+    );
+}
+
+function slugStatusBorder(status: 'idle' | 'checking' | 'available' | 'taken' | 'invalid'): string {
+    switch (status) {
+        case 'available':
+            return 'rgba(132,204,22,0.45)';
+        case 'taken':
+        case 'invalid':
+            return 'rgba(239,68,68,0.45)';
+        default:
+            return 'rgba(255,255,255,0.10)';
+    }
+}
+
+
+/**
+ * DateTimeInput — wraps the native <input type="datetime-local"> to:
+ *   1. Open the platform picker when the user clicks anywhere on the field
+ *      (not just the tiny calendar icon on the right), via the relatively new
+ *      HTMLInputElement.showPicker() API. Falls back gracefully when not
+ *      supported.
+ *   2. Pin precision to minutes (`step="60"` → no seconds in the picker).
+ *
+ * Note on AM/PM: the 12-hour vs 24-hour rendering of datetime-local is
+ * locale-controlled by the browser/OS — there's no portable way to force
+ * 24-hour through HTML alone. Most users will see whatever their system
+ * locale prefers.
+ */
+function DateTimeInput({
+    value,
+    onChange,
+    disabled,
+}: {
+    value: string;
+    onChange: (v: string) => void;
+    disabled?: boolean;
+}) {
+    return (
+        <input
+            type="datetime-local"
+            step={60}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onClick={(e) => {
+                const el = e.currentTarget as HTMLInputElement & {
+                    showPicker?: () => void;
+                };
+                el.showPicker?.();
+            }}
+            onFocus={(e) => {
+                const el = e.currentTarget as HTMLInputElement & {
+                    showPicker?: () => void;
+                };
+                el.showPicker?.();
+            }}
+            disabled={disabled}
+            className="w-full rounded-md px-3 py-2 text-sm bg-transparent outline-none cursor-pointer"
+            style={{
+                border: '1px solid rgba(255,255,255,0.10)',
+                color: '#EDEDED',
+                colorScheme: 'dark',
+            }}
+        />
+    );
 }

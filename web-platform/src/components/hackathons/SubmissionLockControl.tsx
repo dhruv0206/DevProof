@@ -170,10 +170,19 @@ export function SubmissionLockControl({
                     </label>
                     <input
                         type="datetime-local"
+                        step={60}
                         value={localValue}
                         onChange={(e) => {
                             setCloseAt(e.target.value ? new Date(e.target.value).toISOString() : null);
                             setDirty(true);
+                        }}
+                        onClick={(e) => {
+                            // showPicker() opens the platform datetime picker
+                            // anywhere on the field, not just on the small icon.
+                            const el = e.currentTarget as HTMLInputElement & {
+                                showPicker?: () => void;
+                            };
+                            el.showPicker?.();
                         }}
                         disabled={pending}
                         style={{
@@ -183,6 +192,8 @@ export function SubmissionLockControl({
                             padding: '6px 10px',
                             fontSize: 13,
                             fontFamily: 'inherit',
+                            colorScheme: 'dark',
+                            cursor: 'pointer',
                         }}
                     />
                 </div>

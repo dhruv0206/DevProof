@@ -2906,6 +2906,49 @@ def _parse_iso_or_date(s: Optional[str]) -> Optional[datetime]:
     return dt
 
 
+@router.get("/platform-admin/check-slug")
+def platform_check_slug(
+    slug: str = Query(min_length=1, max_length=80),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Platform-admin-only live slug-availability check.
+
+    Drives the debounced indicator on the "Create hackathon" form so
+    users see ``Available`` / ``Already taken`` as they type, instead
+    of finding out at submit time via a 409. Cheap read; no writes.
+
+    Returns:
+        {
+          "slug": "the-input",
+          "valid":     bool,   # passes _SLUG_RE format
+          "available": bool,   # passes format AND no existing row
+          "reason":    str | None  # 'invalid_format' | 'taken' | null
+        }
+    """
+    if not _is_platform_admin(db, user_id):
+        raise HTTPException(status_code=403, detail="Platform admin required")
+
+    normalized = slug.strip().lower()
+    valid = bool(_SLUG_RE.match(normalized)) and 3 <= len(normalized) <= 80
+    if not valid:
+        return {
+            "slug": normalized,
+            "valid": False,
+            "available": False,
+            "reason": "invalid_format",
+        }
+    exists = db.query(Hackathon).filter(
+        Hackathon.slug == normalized,
+    ).first() is not None
+    return {
+        "slug": normalized,
+        "valid": True,
+        "available": not exists,
+        "reason": "taken" if exists else None,
+    }
+
+
 @router.post("/platform-admin/provision-hackathon", status_code=201)
 def platform_provision_hackathon(
     body: PlatformProvisionRequest,
