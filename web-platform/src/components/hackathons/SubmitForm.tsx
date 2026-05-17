@@ -43,12 +43,28 @@ function fieldConfig(key: string) {
     );
 }
 
+export interface SubmitFormInitialValues {
+    githubUrl?: string;
+    tagline?: string;
+    whatItDoes?: string;
+    videoUrl?: string;
+    demoUrl?: string;
+    teamName?: string;
+    teamMembers?: string[];
+    extras?: Record<string, unknown>;
+}
+
 interface Props {
     slug: string;
     extrasRequired: string[];
     extrasOptional: string[];
     maxTeamSize: number | null;
     userId: string;
+    /** When set, the form switches to edit mode: PATCH instead of POST,
+     * submit button reads "Save changes", and the form starts pre-filled. */
+    submissionId?: string;
+    /** Pre-filled values for edit mode. Ignored when submissionId is unset. */
+    initialValues?: SubmitFormInitialValues;
 }
 
 export function SubmitForm({
@@ -56,16 +72,33 @@ export function SubmitForm({
     extrasRequired,
     extrasOptional,
     maxTeamSize,
+    submissionId,
+    initialValues,
 }: Props) {
-    const [githubUrl, setGithubUrl] = useState('');
-    const [tagline, setTagline] = useState('');
-    const [whatItDoes, setWhatItDoes] = useState('');
-    const [videoUrl, setVideoUrl] = useState('');
-    const [demoUrl, setDemoUrl] = useState('');
-    const [teamName, setTeamName] = useState('');
-    const [teamMembers, setTeamMembers] = useState<string[]>([]);
+    const isEditMode = !!submissionId;
+    const iv = initialValues ?? {};
+    const ivExtras = iv.extras ?? {};
+
+    // Pull video/demo back out of legacy extras into the first-class state on
+    // edit — the original form merged them into extras at submit time, so the
+    // stored submission has them in extras_json[demo_video_url/deployed_url].
+    const extrasAsStrings: Record<string, string> = {};
+    for (const [k, v] of Object.entries(ivExtras)) {
+        if (typeof v === 'string') extrasAsStrings[k] = v;
+        else if (Array.isArray(v)) extrasAsStrings[k] = v.join(', ');
+    }
+    const initialVideo = iv.videoUrl ?? extrasAsStrings.demo_video_url ?? '';
+    const initialDemo = iv.demoUrl ?? extrasAsStrings.deployed_url ?? '';
+
+    const [githubUrl, setGithubUrl] = useState(iv.githubUrl ?? '');
+    const [tagline, setTagline] = useState(iv.tagline ?? '');
+    const [whatItDoes, setWhatItDoes] = useState(iv.whatItDoes ?? '');
+    const [videoUrl, setVideoUrl] = useState(initialVideo);
+    const [demoUrl, setDemoUrl] = useState(initialDemo);
+    const [teamName, setTeamName] = useState(iv.teamName ?? '');
+    const [teamMembers, setTeamMembers] = useState<string[]>(iv.teamMembers ?? []);
     const [teamInput, setTeamInput] = useState('');
-    const [extras, setExtras] = useState<Record<string, string>>({});
+    const [extras, setExtras] = useState<Record<string, string>>(extrasAsStrings);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const router = useRouter();
@@ -134,23 +167,25 @@ export function SubmitForm({
             if (videoUrl.trim()) builtExtras.demo_video_url = videoUrl.trim();
             if (demoUrl.trim()) builtExtras.deployed_url = demoUrl.trim();
 
-            const res = await fetch(
-                `/api/hackathons-proxy/${encodeURIComponent(slug)}/submissions`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        github_url: trimmedGh,
-                        extras: builtExtras,
-                        team_members: teamMembers,
-                        tagline: tagline.trim(),
-                        what_it_does: whatItDoes.trim() || null,
-                        demo_url: demoUrl.trim() || null,
-                        team_name: teamName.trim() || null,
-                        tracks_opted_out: [],
-                    }),
-                },
-            );
+            // Edit mode → PATCH; create mode → POST. Same shape in both:
+            // server endpoints are forgiving of unknown extras keys.
+            const url = isEditMode
+                ? `/api/hackathons-proxy/${encodeURIComponent(slug)}/submissions/${encodeURIComponent(submissionId!)}`
+                : `/api/hackathons-proxy/${encodeURIComponent(slug)}/submissions`;
+            const res = await fetch(url, {
+                method: isEditMode ? 'PATCH' : 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    github_url: trimmedGh,
+                    extras: builtExtras,
+                    team_members: teamMembers,
+                    tagline: tagline.trim(),
+                    what_it_does: whatItDoes.trim() || null,
+                    demo_url: demoUrl.trim() || null,
+                    team_name: teamName.trim() || null,
+                    ...(isEditMode ? {} : { tracks_opted_out: [] }),
+                }),
+            });
 
             if (res.ok || res.status === 409) {
                 router.push(`/hackathons/${slug}/me`);
@@ -384,7 +419,9 @@ export function SubmitForm({
 
             <Button type="submit" className="w-full gap-2" size="lg" disabled={submitting}>
                 {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                {submitting ? 'Submitting…' : 'Submit project →'}
+                {submitting
+                    ? (isEditMode ? 'Saving…' : 'Submitting…')
+                    : (isEditMode ? 'Save changes →' : 'Submit project →')}
             </Button>
         </form>
     );

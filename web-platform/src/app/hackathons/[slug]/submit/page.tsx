@@ -17,7 +17,7 @@ import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { AuthRequiredModal } from '@/components/shared/AuthRequiredModal';
-import { SubmitForm } from '@/components/hackathons/SubmitForm';
+import { SubmitForm, type SubmitFormInitialValues } from '@/components/hackathons/SubmitForm';
 import { API_BASE_URL, buildProxyHeaders } from '@/lib/internal-proxy';
 
 const TEXT_DIM = '#666666';
@@ -50,6 +50,34 @@ async function fetchEventForUser(slug: string, _userId: string | null): Promise<
         });
         if (!res.ok) return null;
         return (await res.json()) as AuthedEvent;
+    } catch {
+        return null;
+    }
+}
+
+interface SubmissionDetailResponse {
+    submission_id: string;
+    github_url: string;
+    extras: Record<string, unknown>;
+    team_members: string[];
+    tagline?: string | null;
+    what_it_does?: string | null;
+    demo_url?: string | null;
+    team_name?: string | null;
+}
+
+async function fetchSubmissionForEdit(
+    slug: string,
+    submissionId: string,
+): Promise<SubmissionDetailResponse | null> {
+    try {
+        const fwdHeaders = await buildProxyHeaders({ noContentType: true });
+        const res = await fetch(
+            `${API_BASE_URL}/api/hackathons/${encodeURIComponent(slug)}/submissions/${encodeURIComponent(submissionId)}`,
+            { cache: 'no-store', headers: fwdHeaders },
+        );
+        if (!res.ok) return null;
+        return (await res.json()) as SubmissionDetailResponse;
     } catch {
         return null;
     }
@@ -112,9 +140,25 @@ export default async function HackathonSubmitPage({
         redirect(`/hackathons/${slug}/join`);
     }
 
-    // Already submitted — go view it.
-    if (event.your_submission_id) {
-        redirect(`/hackathons/${slug}/me`);
+    // Existing submission? Switch to EDIT mode with prefilled values instead
+    // of redirecting away — the old "redirect to /me" was the loop the user
+    // hit when clicking the Edit submission button on /me.
+    const isEditMode = !!event.your_submission_id;
+    let initialValues: SubmitFormInitialValues | undefined = undefined;
+    if (isEditMode) {
+        const existing = await fetchSubmissionForEdit(slug, event.your_submission_id!);
+        if (existing) {
+            initialValues = {
+                githubUrl: existing.github_url,
+                tagline: existing.tagline ?? '',
+                whatItDoes: existing.what_it_does ?? '',
+                demoUrl: existing.demo_url ?? '',
+                teamName: existing.team_name ?? '',
+                teamMembers: existing.team_members ?? [],
+                extras: existing.extras ?? {},
+                // videoUrl is pulled from extras.demo_video_url by the form itself.
+            };
+        }
     }
 
     // Submission window check (UI-side guardrail; backend re-validates).
@@ -143,7 +187,7 @@ export default async function HackathonSubmitPage({
                 >
                     <span>HACKATHON</span>
                     <span style={{ opacity: 0.6 }}>·</span>
-                    <span>SUBMIT</span>
+                    <span>{isEditMode ? 'EDIT' : 'SUBMIT'}</span>
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'stretch', gap: 14, marginBottom: 18 }}>
@@ -237,6 +281,8 @@ export default async function HackathonSubmitPage({
                         extrasOptional={extrasOptional}
                         maxTeamSize={maxTeamSize}
                         userId={session.user.id}
+                        submissionId={event.your_submission_id ?? undefined}
+                        initialValues={initialValues}
                     />
                 </div>
 

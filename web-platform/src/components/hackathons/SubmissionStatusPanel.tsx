@@ -46,6 +46,12 @@ interface SubmissionDetail {
     score_visible?: boolean;
     score_hidden_reason?: string | null;
     pinned_to_profile?: boolean;
+    // New first-class fields (added 2026-05-17). Optional for backwards-compat
+    // with older clients reading older serializer output.
+    tagline?: string | null;
+    what_it_does?: string | null;
+    demo_url?: string | null;
+    team_name?: string | null;
 }
 
 const POLL_INTERVAL_MS = 15_000;
@@ -250,6 +256,92 @@ export function SubmissionStatusPanel({
                     {shortRepo}
                     <ExternalLink className="h-3 w-3" />
                 </a>
+
+                {/* Tagline + about (new first-class fields, 2026-05-17). Each
+                 * is gated on its own presence so old submissions without
+                 * these fields don't render an empty section. */}
+                {detail.tagline && (
+                    <>
+                        <div className="h-px bg-border" style={{ margin: '16px 0' }} />
+                        <SubmissionFieldLabel>TAGLINE</SubmissionFieldLabel>
+                        <p
+                            style={{
+                                fontSize: 13,
+                                color: '#EDEDED',
+                                lineHeight: 1.55,
+                            }}
+                        >
+                            {detail.tagline}
+                        </p>
+                    </>
+                )}
+
+                {detail.what_it_does && (
+                    <>
+                        <div style={{ marginTop: 14 }} />
+                        <SubmissionFieldLabel>ABOUT</SubmissionFieldLabel>
+                        <p
+                            style={{
+                                fontSize: 13,
+                                color: '#A1A1A1',
+                                lineHeight: 1.55,
+                                whiteSpace: 'pre-wrap',
+                            }}
+                        >
+                            {detail.what_it_does}
+                        </p>
+                    </>
+                )}
+
+                {(detail.demo_url || extrasUrlString(detail.extras, 'demo_video_url')) && (
+                    <>
+                        <div style={{ marginTop: 14 }} />
+                        <SubmissionFieldLabel>LINKS</SubmissionFieldLabel>
+                        <div
+                            style={{
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                gap: 12,
+                                fontSize: 12,
+                            }}
+                        >
+                            {detail.demo_url && (
+                                <a
+                                    href={detail.demo_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="font-mono hover:text-primary"
+                                    style={{ color: '#EDEDED', display: 'inline-flex', alignItems: 'baseline', gap: 4 }}
+                                >
+                                    Live demo
+                                    <ExternalLink className="h-3 w-3" />
+                                </a>
+                            )}
+                            {extrasUrlString(detail.extras, 'demo_video_url') && (
+                                <a
+                                    href={extrasUrlString(detail.extras, 'demo_video_url')!}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="font-mono hover:text-primary"
+                                    style={{ color: '#EDEDED', display: 'inline-flex', alignItems: 'baseline', gap: 4 }}
+                                >
+                                    Video
+                                    <ExternalLink className="h-3 w-3" />
+                                </a>
+                            )}
+                        </div>
+                    </>
+                )}
+
+                {detail.team_name && (
+                    <>
+                        <div style={{ marginTop: 14 }} />
+                        <SubmissionFieldLabel>TEAM_NAME</SubmissionFieldLabel>
+                        <p style={{ fontSize: 13, color: '#EDEDED' }}>
+                            {detail.team_name}
+                        </p>
+                    </>
+                )}
 
                 {detail.team_members.length > 0 && (
                     <>
@@ -474,6 +566,33 @@ export function SubmissionStatusPanel({
         </div>
     );
 }
+
+function SubmissionFieldLabel({ children }: { children: React.ReactNode }) {
+    return (
+        <div
+            className="font-mono"
+            style={{
+                fontSize: 10,
+                letterSpacing: '0.12em',
+                color: TEXT_DIM,
+                textTransform: 'uppercase',
+                marginBottom: 6,
+            }}
+        >
+            {children}
+        </div>
+    );
+}
+
+function extrasUrlString(
+    extras: Record<string, unknown> | null | undefined,
+    key: string,
+): string | null {
+    if (!extras) return null;
+    const v = extras[key];
+    return typeof v === 'string' && v.trim() ? v : null;
+}
+
 
 function HiddenScoreNotice({
     deepAnalysisSeconds,
