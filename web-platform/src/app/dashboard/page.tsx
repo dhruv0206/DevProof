@@ -6,6 +6,7 @@ import { AuthRequiredModal } from '@/components/shared/AuthRequiredModal';
 import { DualAxisHero } from '@/components/profile/DualAxisHero';
 import { ShareScoreButton } from '@/components/profile/ShareScoreButton';
 import { LiveHackathonsBanner } from '@/components/hackathons/LiveHackathonsBanner';
+import { isDeveloperSession } from '@/lib/dev-guard';
 
 export default async function DashboardPage() {
     const session = await auth.api.getSession({
@@ -18,6 +19,22 @@ export default async function DashboardPage() {
                 <AuthRequiredModal
                     title="Sign in to access Dashboard"
                     message="Track your contributions, view stats, and manage your open source journey."
+                />
+            </DashboardLayout>
+        );
+    }
+
+    // Organizer-only sessions (signed in via magic-link, no GitHub linkage)
+    // can land on this page if they paste the URL or follow a stale link,
+    // but the developer dashboard isn't meaningful without GitHub data.
+    // Show the same sign-in CTA — clicking it links their GitHub on top
+    // of their existing organizer identity (BetterAuth handles the merge).
+    if (!(await isDeveloperSession(session))) {
+        return (
+            <DashboardLayout>
+                <AuthRequiredModal
+                    title="Link your GitHub to use the developer dashboard"
+                    message="You're signed in as a hackathon organizer. Link your GitHub account to also use DevProof as a developer — your audits, profile, and contribution tracking will appear here."
                 />
             </DashboardLayout>
         );

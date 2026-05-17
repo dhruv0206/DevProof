@@ -1,11 +1,12 @@
 'use client';
 
-import { useSession, signIn, signOut } from '@/lib/auth-client';
+import { useSession, signIn, signOut, useDevStatus, clearDevStatusCache } from '@/lib/auth-client';
 import { Button } from '@/components/ui/button';
 import { ThemeToggle } from '@/components/layout/ThemeToggle';
 
 export function Header() {
     const { data: session, isPending } = useSession();
+    const devStatus = useDevStatus();
 
     // We can remove the mounted check here since we're not doing client-side theme switching directly in this component anymore
     // But if we want to avoid hydration mismatch with the auth buttons, we might still want it
@@ -16,8 +17,14 @@ export function Header() {
     };
 
     const handleSignOut = async () => {
+        clearDevStatusCache();
         await signOut({ fetchOptions: { onSuccess: () => { window.location.href = '/'; } } });
     };
+
+    // Organizer-only: session exists, but no GitHub linkage. Hide developer
+    // CTAs and surface a hackathon chip instead of "Audit your code" UI.
+    const isOrganizerOnly =
+        !!session?.user && !devStatus.loading && !devStatus.isDeveloper;
 
 
 
@@ -74,6 +81,20 @@ export function Header() {
                         {/* Auth Buttons */}
                         {isPending ? (
                             <div className="w-9 h-9 rounded-full bg-muted animate-pulse" />
+                        ) : session && isOrganizerOnly ? (
+                            // Organizer-only session: no GitHub linkage. Skip the
+                            // developer avatar/audit CTAs entirely; offer a path
+                            // back to their hackathon admin.
+                            <div className="flex items-center gap-2">
+                                <a href="/hackathons/admin">
+                                    <Button variant="outline" size="sm">
+                                        Hackathons
+                                    </Button>
+                                </a>
+                                <Button variant="ghost" size="sm" onClick={handleSignOut}>
+                                    Sign Out
+                                </Button>
+                            </div>
                         ) : session ? (
                             <div className="flex items-center gap-2">
                                 {session.user.image && (

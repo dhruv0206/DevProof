@@ -3,6 +3,7 @@ import { headers } from 'next/headers';
 import { TrackedIssuesDashboard } from '@/components/issues/TrackedIssuesDashboard';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { AuthRequiredModal } from '@/components/shared/AuthRequiredModal';
+import { isDeveloperSession } from '@/lib/dev-guard';
 
 export default async function MyIssuesPage() {
     const session = await auth.api.getSession({
@@ -15,6 +16,17 @@ export default async function MyIssuesPage() {
                 <AuthRequiredModal
                     title="Sign in to track issues"
                     message="Track issues you're working on and submit PRs for verification."
+                />
+            </DashboardLayout>
+        );
+    }
+
+    if (!(await isDeveloperSession(session))) {
+        return (
+            <DashboardLayout>
+                <AuthRequiredModal
+                    title="Link your GitHub to track issues"
+                    message="You're signed in as a hackathon organizer. Issue tracking ties contributions to a GitHub account — link yours to start tracking."
                 />
             </DashboardLayout>
         );

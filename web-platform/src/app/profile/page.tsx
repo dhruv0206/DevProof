@@ -6,6 +6,7 @@ import { AuthRequiredModal } from '@/components/shared/AuthRequiredModal';
 import { Button } from '@/components/ui/button';
 import { ExternalLink } from 'lucide-react';
 import Link from 'next/link';
+import { isDeveloperSession } from '@/lib/dev-guard';
 
 
 export default async function ProfilePage() {
@@ -19,6 +20,19 @@ export default async function ProfilePage() {
                 <AuthRequiredModal
                     title="Sign in to view your profile"
                     message="Build and share your verified developer portfolio."
+                />
+            </DashboardLayout>
+        );
+    }
+
+    // Organizer-only session: name isn't a GitHub username, so all
+    // downstream queries would break. Show the same sign-in CTA.
+    if (!(await isDeveloperSession(session))) {
+        return (
+            <DashboardLayout>
+                <AuthRequiredModal
+                    title="Link your GitHub to view your developer profile"
+                    message="You're signed in as a hackathon organizer. Profiles are tied to a GitHub account — link yours to build a developer portfolio here."
                 />
             </DashboardLayout>
         );
