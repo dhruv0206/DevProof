@@ -32,6 +32,9 @@ interface AuthedEvent {
     rules_text?: string | null;
     your_role: 'organizer' | 'judge' | 'participant' | null;
     your_submission_id: string | null;
+    /** Effective lock state from backend — true iff scheduled close has passed
+     * OR organizer manually toggled the lock override. */
+    submissions_locked?: boolean;
     // settings is documented public on the event response too; defensive default below.
     settings?: {
         extras_required?: string[];
@@ -162,8 +165,14 @@ export default async function HackathonSubmitPage({
     }
 
     // Submission window check (UI-side guardrail; backend re-validates).
+    // Prefer the authoritative `submissions_locked` flag from backend (which
+    // accounts for the organizer's manual override toggle); fall back to a
+    // scheduled-close comparison if the backend hasn't updated yet.
     const closesAt = new Date(event.submissions_close_at);
-    const closed = closesAt.getTime() < Date.now();
+    const closed =
+        typeof event.submissions_locked === 'boolean'
+            ? event.submissions_locked
+            : closesAt.getTime() < Date.now();
 
     const settings = event.settings ?? {};
     const extrasRequired = settings.extras_required ?? [];
@@ -235,28 +244,34 @@ export default async function HackathonSubmitPage({
                     <div
                         className="font-mono"
                         style={{
-                            padding: '12px 14px',
-                            border: '1px solid rgba(239,68,68,0.35)',
+                            padding: '14px 16px',
+                            border: '1px solid rgba(252,165,165,0.40)',
                             background: 'rgba(239,68,68,0.06)',
-                            fontSize: 12,
-                            color: '#FCA5A5',
                             lineHeight: 1.5,
                             marginBottom: 22,
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            gap: 12,
                         }}
                     >
-                        <div
-                            style={{
-                                fontSize: 10,
-                                letterSpacing: '0.12em',
-                                textTransform: 'uppercase',
-                                marginBottom: 4,
-                            }}
-                        >
-                            CLOSED · SUBMISSIONS_LOCKED
-                        </div>
-                        <div>
-                            The submission window has closed. New submissions are no longer accepted —
-                            ping the organizer if you think this is wrong.
+                        <span style={{ fontSize: 16, marginTop: 1 }}>🔒</span>
+                        <div style={{ flex: 1 }}>
+                            <div
+                                style={{
+                                    fontSize: 11,
+                                    letterSpacing: '0.12em',
+                                    textTransform: 'uppercase',
+                                    color: '#fca5a5',
+                                    marginBottom: 4,
+                                }}
+                            >
+                                SUBMISSIONS LOCKED · {closesAt.toLocaleString()}
+                            </div>
+                            <div style={{ fontSize: 12.5, color: '#A1A1A1' }}>
+                                {isEditMode
+                                    ? 'The window has closed. Your fields are read-only — changes can’t be saved. Ping the organizer if you think this is a mistake.'
+                                    : 'New submissions are no longer accepted. Ping the organizer if you think this is a mistake.'}
+                            </div>
                         </div>
                     </div>
                 )}
@@ -283,6 +298,7 @@ export default async function HackathonSubmitPage({
                         userId={session.user.id}
                         submissionId={event.your_submission_id ?? undefined}
                         initialValues={initialValues}
+                        locked={closed}
                     />
                 </div>
 

@@ -178,10 +178,62 @@ export default async function HackathonMePage({
                     <span style={{ opacity: 0.6 }}>·</span>
                     <span style={{ color: '#A1A1A1' }}>@{session.user.name}</span>
                     <span style={{ opacity: 0.6 }}>·</span>
-                    <span>{canEdit ? 'WINDOW_OPEN' : 'WINDOW_CLOSED'}</span>
+                    <span
+                        style={{
+                            color: submissionsLocked ? '#fca5a5' : '#84cc16',
+                            letterSpacing: '0.04em',
+                        }}
+                    >
+                        {submissionsLocked ? 'WINDOW_CLOSED' : 'WINDOW_OPEN'}
+                    </span>
                     <span style={{ opacity: 0.6 }}>·</span>
                     <span style={{ color: '#A1A1A1' }}>{closesAt.toLocaleString()}</span>
                 </div>
+
+                {/* Prominent locked banner — surfaces the locked state at the
+                 * top of the page so devs aren't confused about why the edit
+                 * button is missing. */}
+                {submissionsLocked && (
+                    <div
+                        className="font-mono"
+                        style={{
+                            marginBottom: 22,
+                            padding: '14px 16px',
+                            border: '1px solid rgba(252,165,165,0.40)',
+                            background: 'rgba(239,68,68,0.06)',
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            gap: 12,
+                        }}
+                    >
+                        <span style={{ fontSize: 16, marginTop: 1 }}>🔒</span>
+                        <div style={{ flex: 1 }}>
+                            <div
+                                style={{
+                                    fontSize: 11,
+                                    letterSpacing: '0.12em',
+                                    textTransform: 'uppercase',
+                                    color: '#fca5a5',
+                                    marginBottom: 4,
+                                }}
+                            >
+                                SUBMISSIONS LOCKED · {closesAt.toLocaleString()}
+                            </div>
+                            <div
+                                style={{
+                                    fontSize: 12.5,
+                                    color: '#A1A1A1',
+                                    lineHeight: 1.55,
+                                }}
+                            >
+                                The window has closed. Your audit and score
+                                stay viewable, but no more edits or team
+                                changes for this event. If you think this is
+                                a mistake, ping the organizer.
+                            </div>
+                        </div>
+                    </div>
+                )}
 
                 <SubmissionStatusPanel
                     slug={slug}

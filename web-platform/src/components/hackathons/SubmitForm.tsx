@@ -65,6 +65,9 @@ interface Props {
     submissionId?: string;
     /** Pre-filled values for edit mode. Ignored when submissionId is unset. */
     initialValues?: SubmitFormInitialValues;
+    /** Submissions window closed (scheduled close OR manual lock). When true,
+     * the submit button is disabled and the form acts as a read-only view. */
+    locked?: boolean;
 }
 
 export function SubmitForm({
@@ -74,6 +77,7 @@ export function SubmitForm({
     maxTeamSize,
     submissionId,
     initialValues,
+    locked = false,
 }: Props) {
     const isEditMode = !!submissionId;
     const iv = initialValues ?? {};
@@ -128,6 +132,10 @@ export function SubmitForm({
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (submitting) return;
+        if (locked) {
+            setError('Submissions are locked — changes can’t be saved right now.');
+            return;
+        }
         setError(null);
 
         const trimmedGh = githubUrl.trim();
@@ -417,11 +425,18 @@ export function SubmitForm({
                 </div>
             )}
 
-            <Button type="submit" className="w-full gap-2" size="lg" disabled={submitting}>
+            <Button
+                type="submit"
+                className="w-full gap-2"
+                size="lg"
+                disabled={submitting || locked}
+            >
                 {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                {submitting
-                    ? (isEditMode ? 'Saving…' : 'Submitting…')
-                    : (isEditMode ? 'Save changes →' : 'Submit project →')}
+                {locked
+                    ? 'Submissions are locked'
+                    : submitting
+                        ? (isEditMode ? 'Saving…' : 'Submitting…')
+                        : (isEditMode ? 'Save changes →' : 'Submit project →')}
             </Button>
         </form>
     );
