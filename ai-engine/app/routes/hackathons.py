@@ -22,28 +22,31 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Body,
     Depends,
     Header,
     HTTPException,
     Query,
 )
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, text as sql_text
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, get_db
 from app.models.hackathon import (
     AuditStatus,
     Hackathon,
+    HackathonInvite,
     HackathonRole,
     HackathonRoleType,
     HackathonSubmission,
@@ -60,27 +63,96 @@ router = APIRouter(prefix="/api/hackathons", tags=["hackathons"])
 
 # ─── Auth helpers ─────────────────────────────────────────────────────────────
 
+# Shared-secret between Next.js proxies and FastAPI. When set, FastAPI
+# refuses any request claiming an X-User-Id without the matching secret —
+# this stops anonymous callers from impersonating arbitrary user-ids by
+# curling the Cloud Run URL with `-H "X-User-Id: <victim>"`.
+#
+# Resolved at import time. If unset in local dev, the check degrades to
+# "trust X-User-Id" — same as the pre-2026-05-15 behavior — so existing
+# dev flows keep working without configuration churn.
+#
+# In ANY managed runtime we explicitly fail closed: if Cloud Run's
+# K_SERVICE env var is set (it always is, automatically, on Cloud Run)
+# or ENVIRONMENT == "production", we refuse to start without a secret.
+# Without this fail-closed gate, a misconfigured deploy (typo in secret
+# name, removed Secret Manager mount, expired version, broken IAM
+# binding) would silently degrade the backend back to the original
+# impersonable-by-anyone state.
+_INTERNAL_PROXY_SECRET = os.environ.get("INTERNAL_PROXY_SECRET", "").strip()
+
+_IS_MANAGED_RUNTIME = (
+    bool(os.environ.get("K_SERVICE"))                     # Cloud Run / Cloud Functions
+    or os.environ.get("ENVIRONMENT", "").lower() == "production"
+)
+
+if _IS_MANAGED_RUNTIME and not _INTERNAL_PROXY_SECRET:
+    import sys as _sys
+    _sys.stderr.write(
+        "\nFATAL: INTERNAL_PROXY_SECRET is required when running in a "
+        "managed runtime (detected K_SERVICE or ENVIRONMENT=production) "
+        "but was not set.\n"
+        "Without it the FastAPI service trusts X-User-Id from any "
+        "anonymous internet caller, allowing arbitrary user impersonation.\n"
+        "Set it via:  gcloud run services update <service> "
+        "--update-secrets=INTERNAL_PROXY_SECRET=internal-proxy-secret:latest\n"
+        "Refusing to start.\n\n"
+    )
+    _sys.exit(1)
+
+
+def _check_proxy_secret(provided: Optional[str]) -> None:
+    """Reject if the secret is configured but the provided header is
+    missing/wrong. No-op when ``INTERNAL_PROXY_SECRET`` is unset (dev).
+    """
+    if not _INTERNAL_PROXY_SECRET:
+        return  # dev mode — no enforcement
+    if not provided or provided != _INTERNAL_PROXY_SECRET:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing internal proxy credentials",
+        )
+
+
 def _current_user_id(
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_internal_proxy_secret: Optional[str] = Header(
+        default=None, alias="X-Internal-Proxy-Secret",
+    ),
 ) -> str:
     """Resolve the authenticated user-id from the X-User-Id header.
 
     BetterAuth runs in the Next.js layer; the server-side proxy forwards
-    the resolved user-id as ``X-User-Id`` (same as ``users.py`` /
-    ``profile.py``). Missing header => 401.
+    the resolved user-id as ``X-User-Id`` plus a shared
+    ``X-Internal-Proxy-Secret``. We validate the secret BEFORE trusting
+    the user-id claim — without this, any anonymous caller could
+    impersonate any user by curling FastAPI directly with the victim's
+    user-id in the header.
+
+    Missing X-User-Id => 401 (unauthenticated).
+    Missing/wrong secret (when configured) => 401 (untrusted caller).
     """
     if not x_user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
+    _check_proxy_secret(x_internal_proxy_secret)
     return x_user_id
 
 
 def _optional_user_id(
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_internal_proxy_secret: Optional[str] = Header(
+        default=None, alias="X-Internal-Proxy-Secret",
+    ),
 ) -> Optional[str]:
     """Like ``_current_user_id`` but returns ``None`` for anonymous callers
-    instead of raising. Used by the public event-fetch endpoint.
+    instead of raising. Anonymous callers (no X-User-Id) skip the secret
+    check entirely — public endpoints stay public. Callers that DO claim
+    a user-id must also present the secret, same as ``_current_user_id``.
     """
-    return x_user_id or None
+    if not x_user_id:
+        return None
+    _check_proxy_secret(x_internal_proxy_secret)
+    return x_user_id
 
 
 def _require_role(
@@ -103,19 +175,38 @@ def _require_role(
     return role
 
 
+def _is_platform_admin(db: Session, user_id: Optional[str]) -> bool:
+    """Return True iff this user has the platform-admin flag set.
+
+    Platform admins (DevProof staff, created via ``scripts/create_admin.py
+    --platform-admin``) get full read/write access to every hackathon on
+    the platform — they don't need a per-event role row.
+    """
+    if not user_id:
+        return False
+    row = db.execute(
+        sql_text('SELECT "isPlatformAdmin" FROM "user" WHERE id = :uid'),
+        {"uid": user_id},
+    ).first()
+    return bool(row and row[0])
+
+
 def _require_admin_access(
     db: Session,
     hackathon: Hackathon,
     user_id: Optional[str],
-    admin_code: Optional[str],
 ) -> str:
-    """Admin-tier access check accepting either GitHub-authed organizer/judge
-    role OR a valid ``organizer_access_code`` paste.
+    """Admin-tier access check (read or read-write depending on role).
 
-    Returns a string label for audit logs: ``"role:<role>"`` or ``"code"``.
-    Raises 403 otherwise.
+    Requires a signed-in user with ORGANIZER, JUDGE, or OBSERVER role on
+    THIS specific hackathon. Platform admins are intentionally NOT
+    auto-passed — organizers expect their submissions to be private from
+    DevProof staff. Platform admins use the narrow reissue-invite
+    endpoint instead of full event access.
+
+    Returns a string label for audit logs: ``"role:<role>"``. Raises 403
+    otherwise.
     """
-    # Path A: GitHub-authed user with organizer/judge role
     if user_id:
         role = db.query(HackathonRole).filter(
             HackathonRole.hackathon_id == hackathon.id,
@@ -124,17 +215,40 @@ def _require_admin_access(
         if role is not None and role.role in (
             HackathonRoleType.ORGANIZER.value,
             HackathonRoleType.JUDGE.value,
+            HackathonRoleType.OBSERVER.value,
         ):
             return f"role:{role.role}"
 
-    # Path B: organizer access code
-    if admin_code and hackathon.organizer_access_code:
-        if secrets.compare_digest(admin_code, hackathon.organizer_access_code):
-            return "code"
+    raise HTTPException(
+        status_code=403,
+        detail="Admin access required — sign in via the magic link sent to your email",
+    )
+
+
+def _require_organizer(
+    db: Session,
+    hackathon: Hackathon,
+    user_id: Optional[str],
+) -> str:
+    """Strict organizer-only check (write actions: invite, remove, settings).
+
+    Judges/observers cannot invite or remove team members. Platform
+    admins are not auto-passed here either — they have a separate narrow
+    endpoint (``platform-reissue-invite``) that only mints magic links
+    and never exposes submission data.
+    """
+    if user_id:
+        role = db.query(HackathonRole).filter(
+            HackathonRole.hackathon_id == hackathon.id,
+            HackathonRole.user_id == user_id,
+            HackathonRole.role == HackathonRoleType.ORGANIZER.value,
+        ).first()
+        if role is not None:
+            return f"role:{role.role}"
 
     raise HTTPException(
         status_code=403,
-        detail="Admin access required (sign in as organizer or paste the admin code)",
+        detail="Organizer access required",
     )
 
 
@@ -628,7 +742,7 @@ def create_hackathon(
         judging_starts_at=body.judging_starts_at,
         ends_at=body.ends_at,
         access_code=_generate_access_code(),
-        organizer_access_code=_generate_access_code(),
+        organizer_access_code=None,  # legacy code-paste auth removed; magic links only
         settings_json=body.settings.model_dump(),
         sponsors_json=[s.model_dump() for s in body.sponsors],
     )
@@ -648,7 +762,6 @@ def create_hackathon(
         "id": str(hackathon.id),
         "slug": hackathon.slug,
         "access_code": hackathon.access_code,
-        "organizer_access_code": hackathon.organizer_access_code,
         "organizer_user_id": hackathon.organizer_user_id,
         "created_at": _isoformat(hackathon.created_at),
     }
@@ -953,31 +1066,6 @@ def join_hackathon(
         "role": new_role.role,
         "hackathon_id": str(h.id),
     }
-
-
-# ─── Endpoint 3b: Validate organizer admin code ───────────────────────────────
-
-class AdminAuthRequest(BaseModel):
-    code: str = Field(min_length=1, max_length=64)
-
-
-@router.post("/{slug}/admin-auth")
-def admin_auth(
-    slug: str,
-    body: AdminAuthRequest,
-    db: Session = Depends(get_db),
-):
-    """Validate a pasted organizer admin code. Returns 200 on match — the
-    Next.js layer is responsible for setting an httpOnly cookie that the
-    browser then forwards as ``X-Hackathon-Admin-Code`` on subsequent admin
-    requests. Returns 403 on mismatch.
-    """
-    h = _get_hackathon_by_slug(db, slug)
-    if not h.organizer_access_code or not secrets.compare_digest(
-        body.code, h.organizer_access_code,
-    ):
-        raise HTTPException(status_code=403, detail="Invalid admin code")
-    return {"ok": True, "hackathon_id": str(h.id), "slug": h.slug}
 
 
 # ─── Endpoint 4: Submit project ───────────────────────────────────────────────
@@ -1312,12 +1400,10 @@ def list_submissions_admin(
     audit_status: Optional[str] = Query(default=None),
     sort: str = Query(default="score_desc", pattern="^(score_desc|recent)$"),
     db: Session = Depends(get_db),
-    user_id: Optional[str] = Depends(_optional_user_id),
-    x_admin_code: Optional[str] = Header(default=None, alias="X-Hackathon-Admin-Code"),
-):
+    user_id: Optional[str] = Depends(_optional_user_id),):
     """Organizer/judge dashboard. Returns every submission with full extras."""
     h = _get_hackathon_by_slug(db, slug)
-    _require_admin_access(db, h, user_id, x_admin_code)
+    _require_admin_access(db, h, user_id)
 
     q = db.query(HackathonSubmission).filter(
         HackathonSubmission.hackathon_id == h.id,
@@ -1395,13 +1481,11 @@ def list_submissions_admin(
 def publish_hackathon(
     slug: str,
     db: Session = Depends(get_db),
-    user_id: Optional[str] = Depends(_optional_user_id),
-    x_admin_code: Optional[str] = Header(default=None, alias="X-Hackathon-Admin-Code"),
-):
+    user_id: Optional[str] = Depends(_optional_user_id),):
     """Flip ``published_at`` so the public leaderboard endpoint becomes
     accessible. Idempotent: re-calls return the existing ``published_at``."""
     h = _get_hackathon_by_slug(db, slug)
-    _require_admin_access(db, h, user_id, x_admin_code)
+    _require_admin_access(db, h, user_id)
 
     if h.published_at is None:
         h.published_at = _now()
@@ -1503,4 +1587,601 @@ def get_leaderboard(
         "published_at": _isoformat(h.published_at),
         "rankings": rankings,
         "sponsor_leaderboards": sponsor_boards,
+    }
+
+
+# ─── Endpoints: Multi-admin team + magic-link invites ─────────────────────────
+#
+# Replaces the single ``organizer_access_code`` model with proper role rows
+# in ``hackathon_role`` plus one-time magic-link invites (``hackathon_invite``).
+# Legacy code-paste still works as a fallback so existing events don't break.
+#
+# Roles:
+#   ORGANIZER — full event admin (invite/remove team, publish, settings)
+#   JUDGE     — score submissions, see leaderboard
+#   OBSERVER  — read-only (sponsors)
+#   PARTICIPANT — submit projects (existing flow)
+
+import os as _os  # noqa: E402
+
+_FRONTEND_BASE_URL = _os.environ.get("FRONTEND_BASE_URL", "https://orenda.vision")
+_INVITE_DEFAULT_EXPIRES_DAYS = 7
+
+
+_TEAM_ROLES = {
+    HackathonRoleType.ORGANIZER.value,
+    HackathonRoleType.JUDGE.value,
+    HackathonRoleType.OBSERVER.value,
+}
+
+
+def _serialize_invite(inv: HackathonInvite, slug: str) -> dict[str, Any]:
+    """JSON-friendly view of an invite for list endpoints."""
+    return {
+        "id": str(inv.id),
+        "hackathon_id": str(inv.hackathon_id),
+        "role": inv.role,
+        "invited_email": inv.invited_email,
+        "invited_by": inv.invited_by,
+        "token": inv.token,
+        "magic_link": f"{_FRONTEND_BASE_URL}/hackathons/{slug}/invites/{inv.token}",
+        "expires_at": _isoformat(inv.expires_at),
+        "used_at": _isoformat(inv.used_at),
+        "accepted_by": inv.accepted_by,
+        "revoked_at": _isoformat(inv.revoked_at),
+        "status": inv.status,
+        "created_at": _isoformat(inv.created_at),
+    }
+
+
+class CreateInviteRequest(BaseModel):
+    invited_email: Optional[str] = Field(default=None, max_length=255)
+    role: str = Field(..., min_length=3, max_length=32)
+    expires_in_days: int = Field(default=_INVITE_DEFAULT_EXPIRES_DAYS, ge=1, le=30)
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in _TEAM_ROLES:
+            raise ValueError(
+                f"role must be one of: {sorted(_TEAM_ROLES)}"
+            )
+        return v
+
+
+class ChangeRoleRequest(BaseModel):
+    role: str = Field(..., min_length=3, max_length=32)
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in _TEAM_ROLES:
+            raise ValueError(
+                f"role must be one of: {sorted(_TEAM_ROLES)}"
+            )
+        return v
+
+
+@router.post("/{slug}/invites", status_code=201)
+def create_invite(
+    slug: str,
+    body: CreateInviteRequest,
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(_optional_user_id),):
+    """Create a magic-link invite for a new team member.
+
+    Returns the full magic link the organizer can share. Token is single-use
+    and expires after ``expires_in_days`` (default 7).
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    _require_organizer(db, h, user_id)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Inviting requires a signed-in organizer (cannot invite via legacy code path)",
+        )
+
+    # Generate a token that's effectively impossible to guess.
+    token = secrets.token_urlsafe(24)
+    while db.query(HackathonInvite).filter(HackathonInvite.token == token).first():
+        token = secrets.token_urlsafe(24)
+
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    # Normalize email to lowercase so downstream comparisons (BetterAuth
+    # stores user.email lowercase; the magic-link POST compares them
+    # lowercase) match deterministically regardless of how the organizer
+    # typed it. Without this, "Alice@Example.com" stored verbatim would
+    # fail the no-session-branch lookup and silently break the invite.
+    _normalized_email = (body.invited_email or "").strip().lower() or None
+    inv = HackathonInvite(
+        hackathon_id=h.id,
+        invited_email=_normalized_email,
+        invited_by=user_id,
+        role=body.role,
+        token=token,
+        expires_at=now + timedelta(days=body.expires_in_days),
+        created_at=now,
+    )
+    db.add(inv)
+    db.commit()
+    db.refresh(inv)
+
+    log.info(
+        "[hackathon-invite] created token=%s hackathon=%s role=%s invited_email=%s by=%s",
+        token[:8] + "...", slug, body.role, inv.invited_email, user_id,
+    )
+    return _serialize_invite(inv, slug)
+
+
+@router.get("/{slug}/invites")
+def list_invites(
+    slug: str,
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(_optional_user_id),):
+    """List all invites for this hackathon (pending, accepted, revoked, expired)."""
+    h = _get_hackathon_by_slug(db, slug)
+    _require_organizer(db, h, user_id)
+
+    rows = db.query(HackathonInvite).filter(
+        HackathonInvite.hackathon_id == h.id,
+    ).order_by(desc(HackathonInvite.created_at)).all()
+    return {"invites": [_serialize_invite(r, slug) for r in rows]}
+
+
+@router.delete("/{slug}/invites/{invite_id}", status_code=204)
+def revoke_invite(
+    slug: str,
+    invite_id: str,
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(_optional_user_id),):
+    """Revoke a pending invite. Already-accepted invites stay accepted —
+    revoke the resulting role separately via team management."""
+    h = _get_hackathon_by_slug(db, slug)
+    _require_organizer(db, h, user_id)
+
+    try:
+        invite_uuid = uuid.UUID(invite_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Invite not found")
+
+    inv = db.query(HackathonInvite).filter(
+        HackathonInvite.id == invite_uuid,
+        HackathonInvite.hackathon_id == h.id,
+    ).first()
+    if inv is None:
+        raise HTTPException(status_code=404, detail="Invite not found")
+
+    if inv.revoked_at is None and inv.used_at is None:
+        inv.revoked_at = datetime.now(timezone.utc)
+        inv.revoked_by = user_id
+        db.commit()
+    return None
+
+
+@router.get("/invites/lookup/{token}")
+def lookup_invite(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Public endpoint — anyone holding the token can look up the invite
+    metadata (used by the frontend landing page before the user logs in
+    so we can show "You've been invited to manage X as ROLE")."""
+    inv = db.query(HackathonInvite).filter(
+        HackathonInvite.token == token,
+    ).first()
+    if inv is None:
+        raise HTTPException(status_code=404, detail="Invite not found")
+
+    h = db.query(Hackathon).filter(Hackathon.id == inv.hackathon_id).first()
+    if h is None:
+        raise HTTPException(status_code=404, detail="Hackathon not found")
+
+    # NOTE: we deliberately do NOT return `invited_email`. Leaked tokens
+    # would otherwise reveal the invitee's email + role + event — useful
+    # for targeted phishing. The email-binding check lives server-side in
+    # accept_invite below.
+    return {
+        "hackathon": {
+            "id": str(h.id),
+            "slug": h.slug,
+            "name": h.name,
+        },
+        "role": inv.role,
+        "status": inv.status,
+        "expires_at": _isoformat(inv.expires_at),
+        "email_bound": inv.invited_email is not None,
+    }
+
+
+@router.post("/invites/accept/{token}", status_code=200)
+def accept_invite(
+    token: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Accept an invite. Creates (or replaces) the hackathon_role row and
+    marks the invite used. Must be authenticated.
+
+    If the user already has a role on this hackathon, the existing row is
+    updated to the new role (re-invite as promotion/demotion is supported).
+    """
+    inv = db.query(HackathonInvite).filter(
+        HackathonInvite.token == token,
+    ).first()
+    if inv is None:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    if not inv.is_active:
+        raise HTTPException(
+            status_code=410,
+            detail=f"Invite is {inv.status}",
+        )
+
+    # Email-binding check: if the invite was issued for a specific email,
+    # only that email's owner may accept. Without this, anyone holding the
+    # token (forwarded email, screenshot, link unfurler cache) could claim
+    # the role using their own DevProof account.
+    if inv.invited_email is not None:
+        caller_row = db.execute(
+            sql_text('SELECT email FROM "user" WHERE id = :uid LIMIT 1'),
+            {"uid": user_id},
+        ).first()
+        caller_email = (caller_row[0] if caller_row else None) or ""
+        if not caller_email:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "This invite is bound to a specific email. Your account "
+                    "has no email on file; sign in via GitHub with a verified "
+                    "email before accepting."
+                ),
+            )
+        if caller_email.strip().lower() != inv.invited_email.strip().lower():
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "This invite was issued for a different email. Sign in "
+                    "with the invited email address to accept."
+                ),
+            )
+
+    h = db.query(Hackathon).filter(Hackathon.id == inv.hackathon_id).first()
+    if h is None:
+        raise HTTPException(status_code=404, detail="Hackathon not found")
+
+    # Upsert hackathon_role for this user
+    existing = db.query(HackathonRole).filter(
+        HackathonRole.hackathon_id == h.id,
+        HackathonRole.user_id == user_id,
+    ).first()
+    if existing is None:
+        db.add(HackathonRole(
+            hackathon_id=h.id,
+            user_id=user_id,
+            role=inv.role,
+        ))
+    else:
+        existing.role = inv.role
+
+    inv.used_at = datetime.now(timezone.utc)
+    inv.accepted_by = user_id
+    db.commit()
+
+    log.info(
+        "[hackathon-invite] accepted token=%s hackathon=%s role=%s user=%s",
+        token[:8] + "...", h.slug, inv.role, user_id,
+    )
+
+    return {
+        "hackathon": {
+            "id": str(h.id),
+            "slug": h.slug,
+            "name": h.name,
+        },
+        "role": inv.role,
+        "redirect_to": f"/hackathons/{h.slug}/admin"
+        if inv.role == HackathonRoleType.ORGANIZER.value
+        else f"/hackathons/{h.slug}",
+    }
+
+
+@router.get("/{slug}/team")
+def list_team(
+    slug: str,
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(_optional_user_id),):
+    """List current team members (everyone with an organizer/judge/observer role)."""
+    h = _get_hackathon_by_slug(db, slug)
+    _require_admin_access(db, h, user_id)
+
+    rows = db.query(HackathonRole).filter(
+        HackathonRole.hackathon_id == h.id,
+        HackathonRole.role.in_([
+            HackathonRoleType.ORGANIZER.value,
+            HackathonRoleType.JUDGE.value,
+            HackathonRoleType.OBSERVER.value,
+        ]),
+    ).order_by(HackathonRole.created_at).all()
+
+    user_ids = [r.user_id for r in rows]
+    users = (
+        db.query(User).filter(User.id.in_(user_ids)).all()
+        if user_ids else []
+    )
+    user_by_id = {u.id: u for u in users}
+
+    team: list[dict[str, Any]] = []
+    for r in rows:
+        u = user_by_id.get(r.user_id)
+        team.append({
+            "user_id": r.user_id,
+            "username": getattr(u, "githubUsername", None) if u else None,
+            "name": getattr(u, "name", None) if u else None,
+            "email": getattr(u, "email", None) if u else None,
+            "role": r.role,
+            "joined_at": _isoformat(r.created_at),
+        })
+    return {"team": team}
+
+
+@router.patch("/{slug}/team/{member_user_id}")
+def change_member_role(
+    slug: str,
+    member_user_id: str,
+    body: ChangeRoleRequest,
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(_optional_user_id),):
+    """Change a team member's role. Organizer-only.
+
+    Prevents the last organizer from demoting themselves (the event would
+    end up with no admin)."""
+    h = _get_hackathon_by_slug(db, slug)
+    _require_organizer(db, h, user_id)
+
+    row = db.query(HackathonRole).filter(
+        HackathonRole.hackathon_id == h.id,
+        HackathonRole.user_id == member_user_id,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Team member not found")
+
+    # Guard: don't allow removing the last organizer
+    if (
+        row.role == HackathonRoleType.ORGANIZER.value
+        and body.role != HackathonRoleType.ORGANIZER.value
+    ):
+        organizer_count = db.query(HackathonRole).filter(
+            HackathonRole.hackathon_id == h.id,
+            HackathonRole.role == HackathonRoleType.ORGANIZER.value,
+        ).count()
+        if organizer_count <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot demote the last organizer — promote someone else first",
+            )
+
+    row.role = body.role
+    db.commit()
+    return {
+        "user_id": member_user_id,
+        "role": body.role,
+    }
+
+
+@router.delete("/{slug}/team/{member_user_id}", status_code=204)
+def remove_member(
+    slug: str,
+    member_user_id: str,
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(_optional_user_id),):
+    """Remove a team member. Organizer-only.
+
+    Prevents removing the last organizer (would orphan the event)."""
+    h = _get_hackathon_by_slug(db, slug)
+    _require_organizer(db, h, user_id)
+
+    row = db.query(HackathonRole).filter(
+        HackathonRole.hackathon_id == h.id,
+        HackathonRole.user_id == member_user_id,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Team member not found")
+
+    if row.role == HackathonRoleType.ORGANIZER.value:
+        organizer_count = db.query(HackathonRole).filter(
+            HackathonRole.hackathon_id == h.id,
+            HackathonRole.role == HackathonRoleType.ORGANIZER.value,
+        ).count()
+        if organizer_count <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot remove the last organizer — invite someone else first",
+            )
+
+    db.delete(row)
+    db.commit()
+    return None
+
+
+@router.get("/admin/mine")
+def list_my_admin_hackathons(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """List hackathons accessible to the current user as an admin.
+
+    Behavior:
+      - Platform admins (``user.isPlatformAdmin = TRUE``) see EVERY
+        hackathon on the platform. DevProof staff use this to manage
+        clients' events.
+      - All other users see only the hackathons where they hold an
+        ORGANIZER role.
+
+    Drives the ``/hackathons/admin`` dashboard. Also surfaces the
+    ``is_platform_admin`` flag so the frontend can render appropriate
+    copy/gating.
+    """
+    is_platform_admin_row = db.execute(
+        sql_text('SELECT "isPlatformAdmin" FROM "user" WHERE id = :uid'),
+        {"uid": user_id},
+    ).first()
+    is_platform_admin = bool(is_platform_admin_row and is_platform_admin_row[0])
+
+    if is_platform_admin:
+        hackathons = (
+            db.query(Hackathon)
+            .order_by(desc(Hackathon.created_at))
+            .all()
+        )
+    else:
+        role_rows = db.query(HackathonRole).filter(
+            HackathonRole.user_id == user_id,
+            HackathonRole.role == HackathonRoleType.ORGANIZER.value,
+        ).all()
+        if not role_rows:
+            return {
+                "hackathons": [],
+                "is_platform_admin": False,
+            }
+        hackathon_ids = [r.hackathon_id for r in role_rows]
+        hackathons = db.query(Hackathon).filter(
+            Hackathon.id.in_(hackathon_ids),
+        ).order_by(desc(Hackathon.created_at)).all()
+
+    items: list[dict[str, Any]] = []
+    for h in hackathons:
+        sub_count = db.query(HackathonSubmission).filter(
+            HackathonSubmission.hackathon_id == h.id,
+            HackathonSubmission.submission_status == SubmissionStatus.SUBMITTED.value,
+        ).count()
+        team_count = db.query(HackathonRole).filter(
+            HackathonRole.hackathon_id == h.id,
+            HackathonRole.role.in_([
+                HackathonRoleType.ORGANIZER.value,
+                HackathonRoleType.JUDGE.value,
+                HackathonRoleType.OBSERVER.value,
+            ]),
+        ).count()
+        items.append({
+            "id": str(h.id),
+            "slug": h.slug,
+            "name": h.name,
+            "starts_at": _isoformat(h.starts_at),
+            "ends_at": _isoformat(h.ends_at),
+            "published_at": _isoformat(h.published_at),
+            "submission_count": sub_count,
+            "team_count": team_count,
+        })
+    return {
+        "hackathons": items,
+        "is_platform_admin": is_platform_admin,
+    }
+
+
+# ─── Platform-admin: reissue a magic-link invite ──────────────────────────────
+
+@router.post("/{slug}/admin/platform-reissue-invite", status_code=201)
+def platform_reissue_invite(
+    slug: str,
+    body: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Mint a fresh magic-link invite for any organizer/judge/observer.
+
+    NARROW endpoint — platform admins only. This is the operator's
+    "recover lost session" tool: when an organizer like Elsa loses her
+    session (cookie cleared, expired, lost the email), the platform
+    admin can issue a new magic link without ever entering the per-event
+    admin UI. That keeps submissions private from DevProof staff.
+
+    Body: ``{"email": str, "role": "organizer"|"judge"|"observer",
+              "expires_in_days": int (optional, default 14)}``
+
+    Returns: ``{"token": str, "magic_link": str}``.
+    """
+    if not _is_platform_admin(db, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Platform admin required",
+        )
+
+    email = (body.get("email") or "").strip().lower()
+    role = (body.get("role") or "organizer").strip().lower()
+    expires_in_days = int(body.get("expires_in_days") or 14)
+
+    if not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="email is required")
+    if role not in (
+        HackathonRoleType.ORGANIZER.value,
+        HackathonRoleType.JUDGE.value,
+        HackathonRoleType.OBSERVER.value,
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="role must be one of organizer | judge | observer",
+        )
+
+    hackathon = _get_hackathon_by_slug(db, slug)
+
+    # Auto-create the user row if missing. The magic-link click is the
+    # invitee's email-ownership proof (standard email-magic-link UX, same
+    # as Slack/Linear/Notion). The user is created with
+    # ``emailVerified=FALSE``; the Next.js magic-link POST handler
+    # atomically flips it to TRUE when they accept.
+    #
+    # Defense against skeleton-user pre-takeover: BetterAuth's
+    # ``accountLinking`` is DISABLED (see web-platform/src/lib/auth.ts).
+    # With linking off, a future GitHub OAuth sign-in cannot silently
+    # merge into the skeleton row — BetterAuth refuses the merge
+    # entirely. A user who wants to combine their organizer identity
+    # with a developer identity must use the explicit "Link GitHub"
+    # flow from /settings.
+    user_row = db.execute(
+        sql_text('SELECT id FROM "user" WHERE email = :email LIMIT 1'),
+        {"email": email},
+    ).first()
+    if user_row is None:
+        new_user_id = secrets.token_urlsafe(16)
+        now = datetime.now(timezone.utc)
+        db.execute(
+            sql_text("""
+                INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+                VALUES (:id, :name, :email, FALSE, :now, :now)
+            """),
+            {
+                "id": new_user_id,
+                "name": email.split("@")[0],
+                "email": email,
+                "now": now,
+            },
+        )
+
+    token = secrets.token_urlsafe(24)
+    while db.query(HackathonInvite).filter(HackathonInvite.token == token).first():
+        token = secrets.token_urlsafe(24)
+
+    now = datetime.now(timezone.utc)
+    invite = HackathonInvite(
+        hackathon_id=hackathon.id,
+        invited_email=email,
+        invited_by=user_id,  # the platform admin issuing the invite
+        role=role,
+        token=token,
+        expires_at=now + timedelta(days=expires_in_days),
+        created_at=now,
+    )
+    db.add(invite)
+    db.commit()
+
+    frontend_base = os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000")
+    magic_link = f"{frontend_base}/hackathons/{slug}/invites/{token}"
+
+    return {
+        "token": token,
+        "magic_link": magic_link,
+        "expires_at": _isoformat(invite.expires_at),
     }

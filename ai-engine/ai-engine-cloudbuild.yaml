@@ -1,11 +1,25 @@
 steps:
-  # Build the container image
+  # Build the container image. GITHUB_TOKEN is sourced from Secret Manager via
+  # availableSecrets (NOT --substitutions) so it never lands in build metadata.
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '--build-arg', 'GITHUB_TOKEN=$_GITHUB_TOKEN', '-t', 'gcr.io/${PROJECT_ID}/backend', '-f', 'ai-engine/Dockerfile', '.']
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        docker build \
+          --build-arg GITHUB_TOKEN="$$GITHUB_TOKEN" \
+          -t gcr.io/$PROJECT_ID/backend \
+          -f ai-engine/Dockerfile .
+    secretEnv: ['GITHUB_TOKEN']
 
   # Push the container image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/${PROJECT_ID}/backend']
+    args: ['push', 'gcr.io/$PROJECT_ID/backend']
 
 images:
-  - 'gcr.io/${PROJECT_ID}/backend'
+  - 'gcr.io/$PROJECT_ID/backend'
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/github-token/versions/latest
+      env: 'GITHUB_TOKEN'

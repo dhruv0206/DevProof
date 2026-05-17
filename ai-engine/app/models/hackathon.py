@@ -30,9 +30,10 @@ from app.database import Base
 
 
 class HackathonRoleType(str, Enum):
-    ORGANIZER = "organizer"
-    JUDGE = "judge"
-    PARTICIPANT = "participant"
+    ORGANIZER = "organizer"     # full event admin — settings, awards, invites, publish
+    JUDGE = "judge"             # read submissions + score
+    OBSERVER = "observer"       # read-only (sponsors who want visibility)
+    PARTICIPANT = "participant" # can submit + be on a team
 
 
 class SubmissionStatus(str, Enum):
@@ -200,11 +201,82 @@ class HackathonSubmission(Base):
     )
 
 
+# ─── HackathonInvite ──────────────────────────────────────────────────────────
+
+class HackathonInvite(Base):
+    """Magic-link invitations to grant a HackathonRole.
+
+    The invite token is the *only* credential needed to claim the role —
+    once accepted, the recipient gets a normal hackathon_role row and uses
+    their regular DevProof session for subsequent access. Tokens are
+    single-use, expire (default 7 days), and revocable.
+
+    Multi-admin & multi-hackathon both fall out of this design:
+      * Multi-admin: invite many users to the same hackathon
+      * Multi-hackathon: a user already on event A can be invited to event B
+        without changing their existing role on A
+    """
+    __tablename__ = "hackathon_invite"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    hackathon_id = Column(UUID(as_uuid=True), ForeignKey("hackathon.id"), nullable=False)
+    invited_email = Column(String, nullable=True)              # optional; null = "anyone with link"
+    invited_by = Column(String, ForeignKey("user.id"), nullable=False)
+    role = Column(String(32), nullable=False)                  # HackathonRoleType.value
+
+    token = Column(String, nullable=False, unique=True)        # 32-char base64
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)                  # single-use marker
+    accepted_by = Column(String, ForeignKey("user.id"), nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoked_by = Column(String, ForeignKey("user.id"), nullable=True)
+
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        Index("ix_hackathon_invite_token", "token"),
+        Index("ix_hackathon_invite_hackathon", "hackathon_id"),
+        Index("ix_hackathon_invite_email", "invited_email"),
+    )
+
+    @property
+    def is_active(self) -> bool:
+        """True if the invite can still be accepted."""
+        now = datetime.now(timezone.utc)
+        # SQLAlchemy returns naive datetimes for TIMESTAMPTZ in some configs;
+        # normalize both sides for safe comparison.
+        expires = self.expires_at
+        if expires is not None and expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        return (
+            self.used_at is None
+            and self.revoked_at is None
+            and (expires is None or expires > now)
+        )
+
+    @property
+    def status(self) -> str:
+        """Human-readable status for UI display."""
+        if self.revoked_at is not None:
+            return "revoked"
+        if self.used_at is not None:
+            return "accepted"
+        now = datetime.now(timezone.utc)
+        expires = self.expires_at
+        if expires is not None and expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if expires is not None and expires <= now:
+            return "expired"
+        return "pending"
+
+
 __all__ = [
     "Hackathon",
     "HackathonRole",
     "HackathonRoleType",
     "HackathonSubmission",
+    "HackathonInvite",
     "SubmissionStatus",
     "AuditStatus",
 ]
