@@ -43,6 +43,12 @@ export interface HackathonDetail {
     submission_count: number;
     your_role: HackathonRole | null;
     your_submission_id: string | null;
+    /** Short participant-join code. Present ONLY when your_role is
+     * organizer/judge — the public listing strips it. */
+    access_code?: string;
+    /** Whether the organizer has enabled sponsor-evidence display on
+     * the judging-detail view. Admin-only field. */
+    show_sponsor_evidence?: boolean;
 }
 
 /** A row in the organizer admin table (endpoint #7). */

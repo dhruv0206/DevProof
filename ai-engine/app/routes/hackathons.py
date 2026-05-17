@@ -47,6 +47,7 @@ from app.models.hackathon import (
     AuditStatus,
     Hackathon,
     HackathonInvite,
+    HackathonJudgeScore,
     HackathonRole,
     HackathonRoleType,
     HackathonSubmission,
@@ -504,16 +505,31 @@ def _run_v4_for_hackathon_submission(
         )
         return
 
-    # Compute sponsor matches against the sponsor config
+    # Compute sponsor matches against the sponsor config.
+    #
+    # Two-pass matching, both running off the same V4 output:
+    #   1. Algo's ``match_sponsors`` — exact-package match for sponsors
+    #      whose ``packages`` list is populated.
+    #   2. Hackathon-side ``compute_name_only_matches`` — name-based
+    #      whole-word match for sponsors with empty ``packages`` (lets
+    #      organizers add a sponsor by brand name alone). Lives in the
+    #      hackathon service layer; doesn't touch the algo.
     sponsor_match: dict[str, list[str]] = {}
     try:
         # Lazy import to avoid pulling the ranking algo on cold start
         from devproof_ranking_algo.schema.v4_output import V4Output
         from devproof_ranking_algo.v4.sponsor_matcher import match_sponsors
+        from app.services.hackathon_audit_view import compute_name_only_matches
 
         # Rehydrate V4Output so claim.sdk_packages_used is the real list[str]
         v4_obj = V4Output.model_validate(v4_out)
         sponsor_match = match_sponsors(v4_obj.claims, sponsors_config)
+
+        name_matches = compute_name_only_matches(v4_out, sponsors_config)
+        for sname, pkgs in name_matches.items():
+            existing = set(sponsor_match.get(sname) or [])
+            existing.update(pkgs)
+            sponsor_match[sname] = sorted(existing)
     except Exception as e:  # noqa: BLE001
         # Sponsor match is best-effort — log and continue with empty match
         log.warning("[hackathon-bg] sponsor_match failed for %s: %s", submission_id, e)
@@ -1008,7 +1024,11 @@ def get_hackathon(
         "max_team_size": settings.get("max_team_size"),
         "rules_text": settings.get("rules_text"),
     }
-    return {
+    # access_code is included ONLY for organizers/judges so they can show
+    # it on the admin dashboard for participants to join. Everyone else
+    # gets it stripped out — even public sponsor packages are scrubbed
+    # above to avoid leaking competitive info.
+    response: dict[str, Any] = {
         "id": str(h.id),
         "slug": h.slug,
         "name": h.name,
@@ -1025,6 +1045,12 @@ def get_hackathon(
         "your_role": your_role,
         "your_submission_id": your_submission_id,
     }
+    if your_role in ("organizer", "judge"):
+        response["access_code"] = h.access_code
+        response["show_sponsor_evidence"] = bool(
+            (h.settings_json or {}).get("show_sponsor_evidence")
+        )
+    return response
 
 
 # ─── Endpoint 3: Join with access code ────────────────────────────────────────
@@ -2184,4 +2210,444 @@ def platform_reissue_invite(
         "token": token,
         "magic_link": magic_link,
         "expires_at": _isoformat(invite.expires_at),
+    }
+
+
+# ─── Judge link + scoring (lightweight, no-auth-required) ────────────────────
+#
+# Model: one shareable URL per hackathon (hackathon.judge_link_token). Any
+# judge holding the URL can score submissions — they type their name once,
+# write notes, give a 0-10 score. Designed for sponsors / community judges
+# who don't have DevProof accounts.
+#
+# Threat model: the token IS the credential. Organizers share the link out-
+# of-band. Regenerating the token immediately invalidates the previous one.
+# All write endpoints are token-gated; nothing escapes a single hackathon.
+
+
+def _get_hackathon_by_judge_token(db: Session, token: str) -> Hackathon:
+    """Resolve a hackathon from its judge_link_token, or 404."""
+    h = db.query(Hackathon).filter(
+        Hackathon.judge_link_token == token,
+    ).first()
+    if h is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Judge link is invalid or has been regenerated",
+        )
+    return h
+
+
+def _normalize_judge_name(name: str) -> str:
+    """Trim + length-cap. Used both at write and uniqueness-lookup time."""
+    return (name or "").strip()[:80]
+
+
+class _JudgeScoreRequest(BaseModel):
+    submission_id: str = Field(min_length=1)
+    judge_name: str = Field(min_length=1, max_length=80)
+    # 0.0 - 5.0 with one decimal. Nullable so a judge can save notes
+    # without a score.
+    score: Optional[float] = Field(default=None, ge=0.0, le=5.0)
+    notes: Optional[str] = Field(default=None, max_length=4000)
+
+    @field_validator("judge_name")
+    @classmethod
+    def _strip_name(cls, v: str) -> str:
+        return _normalize_judge_name(v)
+
+
+@router.get("/{slug}/admin/judge-link")
+def get_judge_link(
+    slug: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Return the current judge-link token + full URL, or nulls if the
+    organizer hasn't generated one yet. Admin-tier (organizer/judge/observer)
+    so judges can pull the same URL if they need to re-share.
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    _require_admin_access(db, h, user_id)
+
+    if h.judge_link_token is None:
+        return {"judge_link_token": None, "judge_link_url": None}
+
+    frontend_base = os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000")
+    return {
+        "judge_link_token": h.judge_link_token,
+        "judge_link_url": f"{frontend_base}/hackathons/{slug}/judge/{h.judge_link_token}",
+    }
+
+
+@router.post("/{slug}/admin/judge-link/regenerate", status_code=200)
+def regenerate_judge_link(
+    slug: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Organizer-only. Generates (or rotates) the shareable judge URL.
+
+    Calling this for a hackathon that already has a judge_link_token
+    REPLACES it — the previous URL stops working immediately. Use this
+    if the link leaks or you need to revoke a specific batch of judges.
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    _require_organizer(db, h, user_id)
+
+    token = secrets.token_urlsafe(24)
+    while db.query(Hackathon).filter(Hackathon.judge_link_token == token).first():
+        token = secrets.token_urlsafe(24)
+
+    h.judge_link_token = token
+    db.commit()
+    db.refresh(h)
+
+    frontend_base = os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000")
+    return {
+        "judge_link_token": token,
+        "judge_link_url": f"{frontend_base}/hackathons/{slug}/judge/{token}",
+    }
+
+
+@router.get("/{slug}/judge/{token}/context")
+def judge_context(
+    slug: str,
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Token-gated, anonymous. Returns the hackathon meta + every complete
+    submission for judges to score. No DevProof account required — the
+    token in the URL is the only credential needed.
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    if h.judge_link_token is None or h.judge_link_token != token:
+        raise HTTPException(
+            status_code=404,
+            detail="Judge link is invalid or has been regenerated",
+        )
+
+    submissions = db.query(HackathonSubmission).filter(
+        HackathonSubmission.hackathon_id == h.id,
+        HackathonSubmission.submission_status == SubmissionStatus.SUBMITTED.value,
+    ).order_by(desc(HackathonSubmission.submitted_at)).all()
+
+    sub_payload: list[dict[str, Any]] = []
+    for s in submissions:
+        audit = None
+        score = None
+        tier = None
+        if s.project_id is not None:
+            pa = db.query(ProjectAudit).filter(
+                ProjectAudit.project_id == s.project_id,
+            ).first()
+            if pa is not None:
+                audit = pa
+                score = pa.v4_score if hasattr(pa, "v4_score") else None
+                tier = pa.v4_tier if hasattr(pa, "v4_tier") else None
+
+        sub_payload.append({
+            "submission_id": str(s.id),
+            "submitter_user_id": s.submitter_user_id,
+            "github_url": s.github_url,
+            "team_members": s.team_members_json or [],
+            "extras": s.extras_json or {},
+            "matched_sponsors": s.matched_sponsors_json or {},
+            "audit_status": s.audit_status,
+            "audit_error": s.audit_error,
+            "repo_score": score,
+            "repo_tier": tier,
+            "submitted_at": _isoformat(s.submitted_at),
+        })
+
+    return {
+        "hackathon": {
+            "slug": h.slug,
+            "name": h.name,
+            "submissions_close_at": _isoformat(h.submissions_close_at),
+            "ends_at": _isoformat(h.ends_at),
+        },
+        "submissions": sub_payload,
+    }
+
+
+@router.get("/{slug}/judge/{token}/scores")
+def judge_my_scores(
+    slug: str,
+    token: str,
+    judge_name: str,
+    db: Session = Depends(get_db),
+):
+    """Token-gated. Returns the scores + notes the given judge_name has
+    already saved, so the judge UI can restore them when the page reloads.
+    Case-insensitive lookup so 'Alice' and 'alice' return the same rows.
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    if h.judge_link_token is None or h.judge_link_token != token:
+        raise HTTPException(status_code=404, detail="Judge link invalid")
+
+    name = _normalize_judge_name(judge_name)
+    if not name:
+        return {"scores": []}
+
+    rows = db.query(HackathonJudgeScore).filter(
+        HackathonJudgeScore.hackathon_id == h.id,
+        func.lower(HackathonJudgeScore.judge_name) == name.lower(),
+    ).all()
+
+    return {
+        "scores": [
+            {
+                "submission_id": str(r.submission_id),
+                "score": float(r.score) if r.score is not None else None,
+                "notes": r.notes or "",
+                "updated_at": _isoformat(r.updated_at),
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/{slug}/judge/{token}/score", status_code=200)
+def submit_judge_score(
+    slug: str,
+    token: str,
+    body: _JudgeScoreRequest,
+    db: Session = Depends(get_db),
+):
+    """Token-gated. Upsert a (submission, judge_name) score+notes row.
+
+    The same judge can call this repeatedly to edit their entry — the
+    UNIQUE (submission_id, judge_name) constraint causes the update to
+    land on the existing row rather than creating a duplicate.
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    if h.judge_link_token is None or h.judge_link_token != token:
+        raise HTTPException(status_code=404, detail="Judge link invalid")
+
+    # Validate submission belongs to this hackathon.
+    sub = db.query(HackathonSubmission).filter(
+        HackathonSubmission.id == body.submission_id,
+        HackathonSubmission.hackathon_id == h.id,
+    ).first()
+    if sub is None:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    judge_name = _normalize_judge_name(body.judge_name)
+    if not judge_name:
+        raise HTTPException(status_code=422, detail="judge_name is required")
+
+    now = datetime.now(timezone.utc)
+    existing = db.query(HackathonJudgeScore).filter(
+        HackathonJudgeScore.submission_id == sub.id,
+        func.lower(HackathonJudgeScore.judge_name) == judge_name.lower(),
+    ).first()
+
+    if existing is None:
+        row = HackathonJudgeScore(
+            hackathon_id=h.id,
+            submission_id=sub.id,
+            judge_name=judge_name,
+            score=body.score,
+            notes=(body.notes or "").strip() or None,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(row)
+    else:
+        existing.score = body.score
+        existing.notes = (body.notes or "").strip() or None
+        # Keep their original casing if they kept the same name, but normalize
+        # to whatever they typed this time (in case of trim/case changes).
+        existing.judge_name = judge_name
+        existing.updated_at = now
+        row = existing
+
+    db.commit()
+    db.refresh(row)
+
+    return {
+        "id": str(row.id),
+        "submission_id": str(row.submission_id),
+        "judge_name": row.judge_name,
+        "score": float(row.score) if row.score is not None else None,
+        "notes": row.notes or "",
+        "updated_at": _isoformat(row.updated_at),
+    }
+
+
+@router.get("/{slug}/admin/submissions/{submission_id}/full")
+def admin_submission_full(
+    slug: str,
+    submission_id: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Admin/judge-tier full audit detail for one submission.
+
+    Returns the same V4 output JSON the dev-side renders via
+    ProjectDetailPanel, plus sponsor-evidence enrichment when the
+    organizer has flipped ``settings.show_sponsor_evidence`` on.
+
+    Pure read-side: no audit re-runs, no algo touching. See
+    app/services/hackathon_audit_view.py for the assembly logic.
+    """
+    from app.services.hackathon_audit_view import build_admin_submission_view
+
+    h = _get_hackathon_by_slug(db, slug)
+    _require_admin_access(db, h, user_id)
+
+    sub = db.query(HackathonSubmission).filter(
+        HackathonSubmission.id == submission_id,
+        HackathonSubmission.hackathon_id == h.id,
+    ).first()
+    if sub is None:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    audit = None
+    if sub.project_id is not None:
+        audit = db.query(ProjectAudit).filter(
+            ProjectAudit.project_id == sub.project_id,
+        ).first()
+
+    return build_admin_submission_view(submission=sub, audit=audit, hackathon=h)
+
+
+@router.get("/{slug}/admin/sponsors")
+def admin_get_sponsors(
+    slug: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Organizer/judge-tier. Returns the full sponsor configuration (with
+    packages, which the public endpoint strips). Used by the admin UI to
+    populate the sponsor editor.
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    _require_admin_access(db, h, user_id)
+    return {"sponsors": h.sponsors_json or []}
+
+
+@router.put("/{slug}/admin/sponsors", status_code=200)
+def admin_replace_sponsors(
+    slug: str,
+    body: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Organizer-only. Replaces the full sponsor list. Body:
+    ``{"sponsors": [{"name": "...", "packages": ["..."], "prize": "..."}, ...]}``.
+
+    Idempotent and full-replace (not merge) — keeps the UI logic dead
+    simple. Validates each entry via the SponsorIn Pydantic model.
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    _require_organizer(db, h, user_id)
+
+    raw = body.get("sponsors")
+    if not isinstance(raw, list):
+        raise HTTPException(
+            status_code=422,
+            detail="sponsors must be a list",
+        )
+
+    # Validate each entry — surfaces a useful 422 if a row is malformed.
+    validated: list[dict[str, Any]] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=f"sponsors[{i}] must be an object",
+            )
+        try:
+            s = SponsorIn(**item)
+        except Exception as e:  # pragma: no cover - Pydantic surfaces messages
+            raise HTTPException(
+                status_code=422,
+                detail=f"sponsors[{i}] invalid: {e}",
+            )
+        validated.append(s.model_dump())
+
+    h.sponsors_json = validated
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(h, "sponsors_json")
+    db.commit()
+
+    return {"sponsors": validated}
+
+
+@router.patch("/{slug}/admin/settings/sponsor-evidence", status_code=200)
+def admin_set_sponsor_evidence(
+    slug: str,
+    body: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Organizer-only. Flip the per-hackathon ``show_sponsor_evidence``
+    toggle stored in ``settings_json``. When true, the admin submission
+    detail view includes per-sponsor file:line evidence. Default false.
+
+    Body: ``{"show_sponsor_evidence": bool}``.
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    _require_organizer(db, h, user_id)
+
+    val = body.get("show_sponsor_evidence")
+    if not isinstance(val, bool):
+        raise HTTPException(
+            status_code=422,
+            detail="show_sponsor_evidence must be a boolean",
+        )
+
+    settings = dict(h.settings_json or {})
+    settings["show_sponsor_evidence"] = val
+    h.settings_json = settings
+    # SQLAlchemy doesn't auto-detect mutations on JSON fields; mark dirty.
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(h, "settings_json")
+    db.commit()
+
+    return {"show_sponsor_evidence": val}
+
+
+@router.get("/{slug}/admin/judge-scores")
+def admin_judge_scores(
+    slug: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Organizer/judge-only aggregation. Returns every judge's scores for
+    every submission. Used by the admin dashboard to compute averages and
+    show per-judge breakdowns.
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    _require_admin_access(db, h, user_id)
+
+    rows = db.query(HackathonJudgeScore).filter(
+        HackathonJudgeScore.hackathon_id == h.id,
+    ).order_by(HackathonJudgeScore.submission_id, HackathonJudgeScore.judge_name).all()
+
+    by_submission: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        sid = str(r.submission_id)
+        by_submission.setdefault(sid, []).append({
+            "judge_name": r.judge_name,
+            "score": float(r.score) if r.score is not None else None,
+            "notes": r.notes or "",
+            "updated_at": _isoformat(r.updated_at),
+        })
+
+    summary: dict[str, dict[str, Any]] = {}
+    for sid, judges in by_submission.items():
+        scored = [j["score"] for j in judges if j["score"] is not None]
+        summary[sid] = {
+            "judge_count": len(judges),
+            "scored_count": len(scored),
+            "avg_score": (sum(scored) / len(scored)) if scored else None,
+            "judges": judges,
+        }
+
+    return {
+        "by_submission": summary,
+        "judge_link_set": h.judge_link_token is not None,
     }

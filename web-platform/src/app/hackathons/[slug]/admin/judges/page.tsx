@@ -1,13 +1,32 @@
+/**
+ * /hackathons/[slug]/admin/judges — organizer view of all judge scores.
+ *
+ * Server-rendered list of submissions with aggregated judge scores:
+ *   - avg score across all judges (0-10)
+ *   - per-judge breakdown (name, score, notes, saved timestamp)
+ *   - click a row to expand
+ *
+ * Read-only — organizers don't edit judges' scores from this view; they
+ * use the Team tab to regenerate the judge link when they need a fresh
+ * round.
+ */
+
 import type { Metadata } from 'next';
 import { headers } from 'next/headers';
-import { auth } from '@/lib/auth';
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
+import { auth } from '@/lib/auth';
 import { HackathonAdminLayout } from '@/components/layout/HackathonAdminLayout';
-import { TeamManagementClient } from '@/components/hackathons/TeamManagementClient';
-import { fetchHackathon, fetchTeam, fetchInvites, fetchJudgeLink } from '@/lib/hackathons';
+import { JudgingResultsSection } from '@/components/hackathons/JudgingResultsSection';
+import {
+    fetchHackathon,
+    fetchJudgeScores,
+    fetchAdminSubmissions,
+} from '@/lib/hackathons';
 
 export const metadata: Metadata = {
-    title: 'Team · DevProof Hackathons' };
+    title: 'Judges scores · DevProof Hackathons',
+};
 
 const TEXT_DIM = '#666666';
 
@@ -15,38 +34,18 @@ interface PageProps {
     params: Promise<{ slug: string }>;
 }
 
-/**
- * `/hackathons/<slug>/admin/team` — Team & invite management.
- *
- * Organizer-only page that lists the current team and pending invites,
- * and lets the organizer create new magic-link invites or revoke/edit
- * existing access. Fetches both team + invites server-side so the
- * initial render is hydrated.
- */
-export default async function TeamPage({ params }: PageProps) {
+export default async function JudgesPage({ params }: PageProps) {
     const { slug } = await params;
 
     const session = await auth.api.getSession({ headers: await headers() });
-
     if (!session?.user?.id) {
-        return (
-            <HackathonAdminLayout>
-                <div className="mx-auto max-w-3xl px-6 py-20 text-center">
-                    <h1 className="text-2xl font-semibold">Access required</h1>
-                    <p className="mt-3 text-sm" style={{ color: TEXT_DIM }}>
-                        You need organizer access to manage this hackathon's team.
-                        Open the magic link sent to you by DevProof.
-                    </p>
-                </div>
-            </HackathonAdminLayout>
-        );
+        redirect(`/hackathons/${slug}/admin`);
     }
 
-    const [hackathon, team, invites, judgeLink] = await Promise.all([
+    const [hackathon, judgeScores, submissions] = await Promise.all([
         fetchHackathon(slug),
-        fetchTeam(slug),
-        fetchInvites(slug),
-        fetchJudgeLink(slug),
+        fetchJudgeScores(slug),
+        fetchAdminSubmissions(slug, { sort: 'score_desc' }),
     ]);
 
     if (hackathon === null) {
@@ -80,18 +79,20 @@ export default async function TeamPage({ params }: PageProps) {
                     >
                         ← {hackathon.name}
                     </Link>
-                    <h1 className="mt-2 text-3xl font-semibold tracking-tight">Team</h1>
+                    <h1 className="mt-2 text-3xl font-semibold tracking-tight">
+                        Judges scores
+                    </h1>
                     <p className="mt-2 text-sm" style={{ color: TEXT_DIM }}>
-                        Invite co-organizers, judges, and observers. Each invite generates
-                        a one-time magic link you can share via email or Slack.
+                        Live aggregate of every judge's scores + notes across
+                        all submissions. Sorted by judge average (highest
+                        first). Refresh to see new entries.
                     </p>
                 </header>
 
-                <TeamManagementClient
+                <JudgingResultsSection
+                    judgeScores={judgeScores}
+                    submissions={submissions?.submissions ?? []}
                     slug={slug}
-                    initialTeam={team}
-                    initialInvites={invites}
-                    initialJudgeLink={judgeLink}
                 />
             </div>
         </HackathonAdminLayout>

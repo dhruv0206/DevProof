@@ -226,6 +226,11 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                                 Awards
                             </Button>
                         </Link>
+                        <Link href={`/hackathons/${hackathon.slug}/admin/judges`}>
+                            <Button variant="outline" size="sm">
+                                Judges scores
+                            </Button>
+                        </Link>
                         {hackathon.your_role === 'organizer' && (
                             <Button
                                 size="sm"
@@ -237,6 +242,14 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                         )}
                     </div>
                 </div>
+
+                {/* Developer-join info */}
+                {hackathon.access_code && (
+                    <DeveloperJoinStrip
+                        slug={hackathon.slug}
+                        accessCode={hackathon.access_code}
+                    />
+                )}
 
                 {/* Counts strip */}
                 <div
@@ -417,5 +430,127 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                 </div>
             )}
         </main>
+    );
+}
+
+
+function DeveloperJoinStrip({
+    slug,
+    accessCode,
+}: {
+    slug: string;
+    accessCode: string;
+}) {
+    const [copiedField, setCopiedField] = useState<'url' | 'code' | null>(null);
+    const joinUrl =
+        typeof window !== 'undefined'
+            ? `${window.location.origin}/hackathons/${slug}/join`
+            : `/hackathons/${slug}/join`;
+
+    const copy = (value: string, which: 'url' | 'code') => {
+        navigator.clipboard.writeText(value).then(
+            () => {
+                setCopiedField(which);
+                setTimeout(() => setCopiedField(null), 1500);
+            },
+            () => {
+                /* ignore */
+            },
+        );
+    };
+
+    const cellStyle: React.CSSProperties = {
+        flex: 1,
+        minWidth: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+    };
+    const labelStyle: React.CSSProperties = {
+        fontSize: 10,
+        letterSpacing: '0.12em',
+        textTransform: 'uppercase',
+        color: TEXT_DIM,
+    };
+    const valueRow: React.CSSProperties = {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+    };
+    const valueStyle: React.CSSProperties = {
+        fontSize: 13,
+        color: '#EDEDED',
+        background: 'rgba(0,0,0,0.25)',
+        padding: '6px 10px',
+        border: '1px solid rgba(255,255,255,0.08)',
+        flex: 1,
+        minWidth: 0,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+    };
+    const copyBtnStyle: React.CSSProperties = {
+        fontSize: 11,
+        padding: '6px 12px',
+        background: 'rgba(255,255,255,0.06)',
+        border: '1px solid rgba(255,255,255,0.10)',
+        color: '#EDEDED',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        whiteSpace: 'nowrap',
+    };
+
+    return (
+        <div
+            className="font-mono"
+            style={{
+                marginTop: 18,
+                padding: '14px 16px',
+                background: 'rgba(204,120,92,0.04)',
+                border: '1px solid rgba(204,120,92,0.30)',
+                display: 'flex',
+                gap: 18,
+                flexWrap: 'wrap',
+                alignItems: 'center',
+            }}
+        >
+            <div style={cellStyle}>
+                <div style={labelStyle}>Developer join URL</div>
+                <div style={valueRow}>
+                    <code style={valueStyle}>{joinUrl}</code>
+                    <button
+                        type="button"
+                        onClick={() => copy(joinUrl, 'url')}
+                        style={copyBtnStyle}
+                    >
+                        {copiedField === 'url' ? '✓ Copied' : 'Copy'}
+                    </button>
+                </div>
+            </div>
+            <div style={{ ...cellStyle, flex: '0 0 auto', minWidth: 180 }}>
+                <div style={labelStyle}>Join code</div>
+                <div style={valueRow}>
+                    <code
+                        style={{
+                            ...valueStyle,
+                            letterSpacing: '0.18em',
+                            fontSize: 16,
+                            color: '#CC785C',
+                            textAlign: 'center',
+                            fontWeight: 500,
+                        }}
+                    >
+                        {accessCode}
+                    </code>
+                    <button
+                        type="button"
+                        onClick={() => copy(accessCode, 'code')}
+                        style={copyBtnStyle}
+                    >
+                        {copiedField === 'code' ? '✓ Copied' : 'Copy'}
+                    </button>
+                </div>
+            </div>
+        </div>
     );
 }

@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import type { InviteSummary, TeamMember } from '@/lib/hackathons';
+import type { InviteSummary, JudgeLinkState, TeamMember } from '@/lib/hackathons';
 
 const CLAY = '#CC785C';
 const TEXT_DIM = '#666666';
@@ -13,6 +13,7 @@ interface Props {
     slug: string;
     initialTeam: TeamMember[];
     initialInvites: InviteSummary[];
+    initialJudgeLink: JudgeLinkState;
 }
 
 type RoleOption = 'organizer' | 'judge' | 'observer';
@@ -23,7 +24,12 @@ const ROLE_DESCRIPTIONS: Record<RoleOption, string> = {
     observer: 'Read-only — sponsor visibility',
 };
 
-export function TeamManagementClient({ slug, initialTeam, initialInvites }: Props) {
+export function TeamManagementClient({
+    slug,
+    initialTeam,
+    initialInvites,
+    initialJudgeLink,
+}: Props) {
     const router = useRouter();
     const [team, setTeam] = useState<TeamMember[]>(initialTeam);
     const [invites, setInvites] = useState<InviteSummary[]>(initialInvites);
@@ -35,6 +41,51 @@ export function TeamManagementClient({ slug, initialTeam, initialInvites }: Prop
     const [expiresInDays, setExpiresInDays] = useState(7);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const [lastCreatedLink, setLastCreatedLink] = useState<string | null>(null);
+
+    // Judge-link state (single shareable URL for all judges)
+    const [judgeLink, setJudgeLink] = useState<JudgeLinkState>(initialJudgeLink);
+    const [judgeLinkBusy, setJudgeLinkBusy] = useState(false);
+    const [judgeLinkError, setJudgeLinkError] = useState<string | null>(null);
+
+    const handleJudgeLinkRegenerate = () => {
+        const isReplacing = judgeLink.token !== null;
+        if (
+            isReplacing &&
+            !confirm(
+                'Regenerating will immediately invalidate the existing link. Anyone using it will lose access. Continue?',
+            )
+        )
+            return;
+        setJudgeLinkBusy(true);
+        setJudgeLinkError(null);
+        startTransition(async () => {
+            try {
+                const res = await fetch(
+                    `/api/hackathons-proxy/${slug}/admin/judge-link/regenerate`,
+                    { method: 'POST' },
+                );
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(
+                        (body?.detail as string) ||
+                            `Generate failed (HTTP ${res.status})`,
+                    );
+                }
+                const body = (await res.json()) as {
+                    judge_link_token: string;
+                    judge_link_url: string;
+                };
+                setJudgeLink({
+                    token: body.judge_link_token,
+                    url: body.judge_link_url,
+                });
+            } catch (e) {
+                setJudgeLinkError((e as Error).message || 'Network error');
+            } finally {
+                setJudgeLinkBusy(false);
+            }
+        });
+    };
 
     const handleCreateInvite = (e: React.FormEvent) => {
         e.preventDefault();
@@ -139,6 +190,90 @@ export function TeamManagementClient({ slug, initialTeam, initialInvites }: Prop
 
     return (
         <div className="space-y-12">
+            {/* ─── Judge link (shareable, no-auth) ─── */}
+            <section>
+                <h2 className="text-lg font-medium mb-1">Judging link</h2>
+                <p className="text-xs mb-4" style={{ color: TEXT_DIM }}>
+                    One shareable URL that any judge can open to score
+                    submissions — no DevProof account needed. Judges type their
+                    name once, then write notes and give scores. Share it with
+                    your judging panel via Slack, email, anywhere.
+                </p>
+
+                <div
+                    className="rounded-lg border p-5"
+                    style={{ borderColor: BORDER }}
+                >
+                    {judgeLink.url ? (
+                        <>
+                            <div
+                                className="flex items-center gap-2 mb-3"
+                                style={{ flexWrap: 'wrap' }}
+                            >
+                                <code
+                                    className="flex-1 break-all p-2 rounded text-xs"
+                                    style={{ background: 'rgba(0,0,0,0.25)' }}
+                                >
+                                    {judgeLink.url}
+                                </code>
+                                <button
+                                    type="button"
+                                    onClick={() => copyToClipboard(judgeLink.url!)}
+                                    className="rounded px-3 py-2 text-xs font-medium"
+                                    style={{
+                                        backgroundColor: 'rgba(255,255,255,0.08)',
+                                        color: '#EDEDED',
+                                    }}
+                                >
+                                    Copy
+                                </button>
+                            </div>
+                            <div
+                                className="flex items-center gap-3"
+                                style={{ flexWrap: 'wrap' }}
+                            >
+                                <button
+                                    type="button"
+                                    onClick={handleJudgeLinkRegenerate}
+                                    disabled={judgeLinkBusy}
+                                    className="rounded px-3 py-2 text-xs font-medium"
+                                    style={{
+                                        border: `1px solid ${BORDER}`,
+                                        color: TEXT_DIM,
+                                        background: 'transparent',
+                                    }}
+                                >
+                                    {judgeLinkBusy ? 'Regenerating…' : 'Regenerate'}
+                                </button>
+                                <span className="text-xs" style={{ color: TEXT_DIM }}>
+                                    Regenerating invalidates the current link immediately.
+                                </span>
+                            </div>
+                        </>
+                    ) : (
+                        <div className="flex items-center gap-3" style={{ flexWrap: 'wrap' }}>
+                            <button
+                                type="button"
+                                onClick={handleJudgeLinkRegenerate}
+                                disabled={judgeLinkBusy}
+                                className="rounded px-4 py-2 text-sm font-medium text-white"
+                                style={{ backgroundColor: CLAY }}
+                            >
+                                {judgeLinkBusy ? 'Generating…' : 'Generate judge link'}
+                            </button>
+                            <span className="text-xs" style={{ color: TEXT_DIM }}>
+                                No link issued yet.
+                            </span>
+                        </div>
+                    )}
+                    {judgeLinkError && (
+                        <p className="text-sm mt-3" style={{ color: '#ef4444' }}>
+                            {judgeLinkError}
+                        </p>
+                    )}
+                </div>
+            </section>
+
             {/* ─── Invite form ─── */}
             <section>
                 <h2 className="text-lg font-medium mb-1">Invite a team member</h2>
@@ -352,6 +487,7 @@ export function TeamManagementClient({ slug, initialTeam, initialInvites }: Prop
                     </ul>
                 )}
             </section>
+
         </div>
     );
 }

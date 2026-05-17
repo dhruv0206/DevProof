@@ -9,7 +9,9 @@ import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
 import { auth } from '@/lib/auth';
 import { SponsorLeaderboardClient } from '@/components/hackathons/SponsorLeaderboardClient';
-import { fetchHackathon, fetchAdminSubmissions} from '@/lib/hackathons';
+import { SponsorEvidenceToggle } from '@/components/hackathons/SponsorEvidenceToggle';
+import { SponsorsManagerClient } from '@/components/hackathons/SponsorsManagerClient';
+import { fetchHackathon, fetchAdminSubmissions, fetchAdminSponsors } from '@/lib/hackathons';
 
 export default async function HackathonSponsorsPage({
     params }: {
@@ -42,7 +44,10 @@ export default async function HackathonSponsorsPage({
         redirect(`/hackathons/${slug}`);
     }
 
-    const submissions = await fetchAdminSubmissions(slug, { sort: 'score_desc' });
+    const [submissions, sponsorConfig] = await Promise.all([
+        fetchAdminSubmissions(slug, { sort: 'score_desc' }),
+        fetchAdminSponsors(slug),
+    ]);
     if (!submissions) {
         return (
             <main className="min-h-screen bg-background flex items-center justify-center px-4">
@@ -62,6 +67,19 @@ export default async function HackathonSponsorsPage({
         <SponsorLeaderboardClient
             hackathon={hackathon}
             submissions={submissions.submissions}
-        />
+        >
+            {hackathon.your_role === 'organizer' && (
+                <>
+                    <SponsorsManagerClient
+                        slug={slug}
+                        initial={sponsorConfig}
+                    />
+                    <SponsorEvidenceToggle
+                        slug={slug}
+                        initial={hackathon.show_sponsor_evidence ?? false}
+                    />
+                </>
+            )}
+        </SponsorLeaderboardClient>
     );
 }

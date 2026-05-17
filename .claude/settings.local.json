@@ -49,7 +49,10 @@
       "Bash(npx -y giget@latest gh:magicuidesign/magicui/registry/default/magicui/terminal.tsx /tmp/magicui-terminal)",
       "Bash(gh search:*)",
       "WebFetch(domain:stripe.com)",
-      "WebFetch(domain:ui.aceternity.com)"
+      "WebFetch(domain:ui.aceternity.com)",
+      "Bash(git log *)",
+      "Bash(git reset *)",
+      "Bash(./venv/Scripts/python.exe -c ' *)"
     ]
   }
 }

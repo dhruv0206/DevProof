@@ -21,7 +21,7 @@ from enum import Enum
 
 from sqlalchemy import (
     Column, String, JSON, DateTime, Index, Integer, ForeignKey, Boolean,
-    UniqueConstraint,
+    Numeric, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -100,6 +100,14 @@ class Hackathon(Base):
 
     # Leaderboard publishing toggle. None = not yet published.
     published_at = Column(DateTime, nullable=True)
+
+    # Shareable single-link judge access. Anyone with this token can open
+    # /hackathons/{slug}/judge/{token}, type their name, and score
+    # submissions — no DevProof account required. Designed for sponsors /
+    # community judges who aren't DevProof users. None = no link issued
+    # yet (organizer hasn't clicked "Generate judge link"). Regenerating
+    # replaces the value, immediately invalidating the previous link.
+    judge_link_token = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
@@ -271,12 +279,53 @@ class HackathonInvite(Base):
         return "pending"
 
 
+# ─── HackathonJudgeScore ──────────────────────────────────────────────────────
+
+class HackathonJudgeScore(Base):
+    """One row per (submission, judge_name). Judges authenticate by typing
+    their name + holding a valid hackathon.judge_link_token URL — no
+    DevProof account needed. The UNIQUE (submission_id, judge_name)
+    constraint means re-saving from the same judge upserts in place,
+    so a judge can edit their score/notes without spawning duplicates.
+    """
+    __tablename__ = "hackathon_judge_score"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    hackathon_id = Column(UUID(as_uuid=True), ForeignKey("hackathon.id"), nullable=False)
+    submission_id = Column(UUID(as_uuid=True), ForeignKey("hackathon_submission.id"), nullable=False)
+
+    # Free-text judge identity. Trimmed + length-capped at the app layer
+    # (request validation). No FK to user — judges may not be DevProof
+    # users at all.
+    judge_name = Column(String, nullable=False)
+
+    # 0.0-10.0 with optional decimal. Nullable so a judge can leave notes
+    # without committing a score (and vice versa). NUMERIC(4,1) in DB.
+    score = Column(Numeric(4, 1), nullable=True)
+
+    notes = Column(String, nullable=True)
+
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "submission_id", "judge_name",
+            name="uq_judge_score_submission_judge",
+        ),
+        Index("ix_judge_score_submission", "submission_id"),
+        Index("ix_judge_score_hackathon", "hackathon_id"),
+    )
+
+
 __all__ = [
     "Hackathon",
     "HackathonRole",
     "HackathonRoleType",
     "HackathonSubmission",
     "HackathonInvite",
+    "HackathonJudgeScore",
     "SubmissionStatus",
     "AuditStatus",
 ]

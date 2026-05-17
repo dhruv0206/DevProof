@@ -109,6 +109,25 @@ def _ensure_user(db, email: str, name: str | None) -> User:
     return user
 
 
+# Short access-code alphabet. Excludes 0/O/1/I/L/B/8 to avoid ambiguity
+# when read aloud or typed by hand. 28 chars × 6 = 28^6 = ~482M codes,
+# plenty of headroom for collision-free generation at any reasonable
+# hackathon scale.
+_SHORT_CODE_ALPHABET = "ACDEFGHJKMNPQRSTUVWXYZ23456789"
+
+
+def _generate_short_access_code(db, length: int = 6) -> str:
+    """Generate a short, human-friendly access code unique across hackathons.
+
+    Retries until uniqueness is satisfied. For 28^6 ≈ 482M codes, retry
+    rate is negligible at our scale.
+    """
+    while True:
+        code = "".join(secrets.choice(_SHORT_CODE_ALPHABET) for _ in range(length))
+        if not db.query(Hackathon).filter(Hackathon.access_code == code).first():
+            return code
+
+
 def _ensure_hackathon(
     db, slug: str, name: str, organizer_user_id: str,
     starts_at: datetime | None, ends_at: datetime | None,
@@ -133,7 +152,7 @@ def _ensure_hackathon(
         submissions_close_at=ends_at,
         judging_starts_at=ends_at,
         ends_at=ends_at,
-        access_code=secrets.token_urlsafe(24),
+        access_code=_generate_short_access_code(db),
         organizer_access_code=None,
         settings_json={},
         sponsors_json=[],

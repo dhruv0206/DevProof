@@ -170,6 +170,91 @@ export async function fetchInvites(slug: string): Promise<InviteSummary[]> {
     }
 }
 
+/** Current judge-link state for the team management UI. */
+export interface JudgeLinkState {
+    token: string | null;
+    url: string | null;
+}
+
+export async function fetchJudgeLink(slug: string): Promise<JudgeLinkState> {
+    try {
+        const res = await fetch(
+            `${API_BASE_URL}/api/hackathons/${slug}/admin/judge-link`,
+            { headers: await authHeaders(), cache: 'no-store' },
+        );
+        if (!res.ok) return { token: null, url: null };
+        const body = (await res.json()) as {
+            judge_link_token: string | null;
+            judge_link_url: string | null;
+        };
+        return { token: body.judge_link_token, url: body.judge_link_url };
+    } catch {
+        return { token: null, url: null };
+    }
+}
+
+/** Aggregated judge scores per submission, for the organizer UI. */
+export interface JudgeScoreEntry {
+    judge_name: string;
+    score: number | null;
+    notes: string;
+    updated_at: string | null;
+}
+export interface JudgeScoreAggregate {
+    judge_count: number;
+    scored_count: number;
+    avg_score: number | null;
+    judges: JudgeScoreEntry[];
+}
+export interface JudgeScoresResult {
+    /** Keyed by submission_id (UUID string). */
+    bySubmission: Record<string, JudgeScoreAggregate>;
+    /** True iff the organizer has minted a shareable judge link. */
+    judgeLinkSet: boolean;
+}
+
+/** Admin-side sponsor config (with packages exposed). */
+export interface SponsorConfig {
+    name: string;
+    packages: string[];
+    prize?: string | null;
+}
+
+export async function fetchAdminSponsors(slug: string): Promise<SponsorConfig[]> {
+    try {
+        const res = await fetch(
+            `${API_BASE_URL}/api/hackathons/${slug}/admin/sponsors`,
+            { headers: await authHeaders(), cache: 'no-store' },
+        );
+        if (!res.ok) return [];
+        const body = (await res.json()) as { sponsors: SponsorConfig[] };
+        return body.sponsors ?? [];
+    } catch {
+        return [];
+    }
+}
+
+
+export async function fetchJudgeScores(slug: string): Promise<JudgeScoresResult> {
+    try {
+        const res = await fetch(
+            `${API_BASE_URL}/api/hackathons/${slug}/admin/judge-scores`,
+            { headers: await authHeaders(), cache: 'no-store' },
+        );
+        if (!res.ok) return { bySubmission: {}, judgeLinkSet: false };
+        const body = (await res.json()) as {
+            by_submission: Record<string, JudgeScoreAggregate>;
+            judge_link_set: boolean;
+        };
+        return {
+            bySubmission: body.by_submission ?? {},
+            judgeLinkSet: !!body.judge_link_set,
+        };
+    } catch {
+        return { bySubmission: {}, judgeLinkSet: false };
+    }
+}
+
 export interface TeamMember {
     user_id: string;
     username: string | null;

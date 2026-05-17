@@ -5,6 +5,7 @@
 
 # Personal test plan — local reference, not part of the codebase
 MANUAL_TEST_PLAN.md
+DEPLOY_PROCEDURE.md
 
 # Python
 __pycache__/

@@ -13,6 +13,10 @@ const CLAY = '#CC785C';
 interface Props {
     hackathon: HackathonDetail;
     submissions: AdminSubmission[];
+    /** Slot rendered between the page header and the leaderboard sections.
+     * Used by the admin sponsors page to mount the organizer-only Sponsors
+     * manager + evidence toggle without breaking the page's header order. */
+    children?: React.ReactNode;
 }
 
 interface SponsorBoard {
@@ -21,7 +25,7 @@ interface SponsorBoard {
     rows: { submission: AdminSubmission; matches: number }[];
 }
 
-export function SponsorLeaderboardClient({ hackathon, submissions }: Props) {
+export function SponsorLeaderboardClient({ hackathon, submissions, children }: Props) {
     const boards = useMemo<SponsorBoard[]>(() => {
         const sponsors = hackathon.sponsors ?? [];
         return sponsors
@@ -77,6 +81,8 @@ export function SponsorLeaderboardClient({ hackathon, submissions }: Props) {
                     Submissions ranked per sponsor by score · then by package match count.
                 </p>
             </header>
+
+            {children && <div className="mb-10">{children}</div>}
 
             {boards.length === 0 ? (
                 <div
