@@ -34,6 +34,7 @@
     "react-activity-calendar": "^3.1.1",
     "react-dom": "19.2.3",
     "recharts": "^3.8.0",
+    "resend": "^6.12.3",
     "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {

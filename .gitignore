@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 
+# Personal test plan — local reference, not part of the codebase
+MANUAL_TEST_PLAN.md
+
 # Python
 __pycache__/
 *.py[cod]
