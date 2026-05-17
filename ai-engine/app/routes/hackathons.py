@@ -2846,6 +2846,202 @@ def platform_reissue_invite(
     }
 
 
+# ─── Platform-admin: provision a fresh hackathon + organizer in one call ────
+#
+# UI counterpart to scripts/create_organizer.py. Lets DevProof staff create
+# a new hackathon, assign an organizer, and mint the magic-link invite from
+# the /hackathons/admin dashboard — without touching the terminal.
+#
+# Guarded by the platform_admin flag on user. The platform admin never gains
+# per-event admin access from this endpoint — the new role row belongs to
+# the invited organizer.
+
+# Same alphabet/length as create_organizer.py so codes generated either way
+# follow the same human-friendly format.
+_PLATFORM_PROVISION_ALPHABET = "ACDEFGHJKMNPQRSTUVWXYZ23456789"
+
+
+def _generate_short_access_code_db(db: Session, length: int = 6) -> str:
+    while True:
+        code = "".join(secrets.choice(_PLATFORM_PROVISION_ALPHABET) for _ in range(length))
+        if not db.query(Hackathon).filter(Hackathon.access_code == code).first():
+            return code
+
+
+class PlatformProvisionRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+    name: Optional[str] = Field(default=None, max_length=200)
+    hackathon_slug: str = Field(min_length=3, max_length=80)
+    hackathon_name: str = Field(min_length=1, max_length=200)
+    starts_at: Optional[str] = Field(default=None)
+    ends_at: Optional[str] = Field(default=None)
+    invite_expires_days: int = Field(default=14, ge=1, le=60)
+
+    @field_validator("hackathon_slug")
+    @classmethod
+    def _check_slug(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not _SLUG_RE.match(v):
+            raise ValueError("slug must be lowercase alphanumeric with hyphens")
+        return v
+
+
+def _parse_iso_or_date(s: Optional[str]) -> Optional[datetime]:
+    """Accept YYYY-MM-DD or full ISO; returns UTC-aware datetime."""
+    if not s:
+        return None
+    raw = s.strip()
+    try:
+        if "T" in raw:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        else:
+            dt = datetime.strptime(raw, "%Y-%m-%d")
+    except (ValueError, TypeError) as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid date '{s}': {e}",
+        )
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+@router.post("/platform-admin/provision-hackathon", status_code=201)
+def platform_provision_hackathon(
+    body: PlatformProvisionRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Platform-admin-only. Creates a new hackathon, ensures a user row for
+    the organizer's email, grants them the ORGANIZER role, mints a magic-link
+    invite, and returns the link the platform admin can copy + send.
+
+    Idempotency: re-running with the same slug returns 409 (slugs are unique).
+    Re-running with the same email reuses the existing user row.
+    """
+    if not _is_platform_admin(db, user_id):
+        raise HTTPException(status_code=403, detail="Platform admin required")
+
+    email = body.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(status_code=422, detail="email is required")
+
+    starts_at = _parse_iso_or_date(body.starts_at)
+    ends_at = _parse_iso_or_date(body.ends_at)
+    if starts_at and ends_at and ends_at <= starts_at:
+        raise HTTPException(
+            status_code=422,
+            detail="ends_at must be after starts_at",
+        )
+
+    # Slug uniqueness — return 409 rather than letting the DB unique
+    # constraint fail with an opaque IntegrityError.
+    existing_h = db.query(Hackathon).filter(
+        Hackathon.slug == body.hackathon_slug,
+    ).first()
+    if existing_h is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Slug '{body.hackathon_slug}' is already taken",
+        )
+
+    # 1. User upsert. Skeleton row created with emailVerified=FALSE; the
+    #    magic-link POST handler atomically flips it to TRUE on acceptance.
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        new_user_id = secrets.token_urlsafe(16)
+        now = datetime.now(timezone.utc)
+        db.execute(
+            sql_text("""
+                INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+                VALUES (:id, :name, :email, FALSE, :now, :now)
+            """),
+            {
+                "id": new_user_id,
+                "name": body.name or email.split("@")[0],
+                "email": email,
+                "now": now,
+            },
+        )
+        db.flush()
+        user = db.query(User).filter(User.id == new_user_id).first()
+        if user is None:  # pragma: no cover - defensive
+            raise HTTPException(
+                status_code=500,
+                detail="User insert succeeded but row could not be re-fetched",
+            )
+
+    # 2. Hackathon row. Default submission/judging dates to ends_at so the
+    #    UI doesn't display NULL-as-epoch ("submissions closed forever").
+    hackathon = Hackathon(
+        id=uuid.uuid4(),
+        slug=body.hackathon_slug,
+        name=body.hackathon_name,
+        organizer_user_id=user.id,
+        starts_at=starts_at,
+        submissions_close_at=ends_at,
+        judging_starts_at=ends_at,
+        ends_at=ends_at,
+        access_code=_generate_short_access_code_db(db),
+        organizer_access_code=None,
+        settings_json={},
+        sponsors_json=[],
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(hackathon)
+    db.flush()
+
+    # 3. Grant ORGANIZER role to the invitee (NOT the platform admin).
+    db.add(HackathonRole(
+        hackathon_id=hackathon.id,
+        user_id=user.id,
+        role=HackathonRoleType.ORGANIZER.value,
+    ))
+
+    # 4. Magic-link invite. Stored with invited_by=platform_admin so the
+    #    audit trail correctly shows who initiated provisioning.
+    token = secrets.token_urlsafe(24)
+    while db.query(HackathonInvite).filter(HackathonInvite.token == token).first():
+        token = secrets.token_urlsafe(24)
+    now = datetime.now(timezone.utc)
+    invite = HackathonInvite(
+        hackathon_id=hackathon.id,
+        invited_email=email,
+        invited_by=user_id,  # the platform admin
+        role=HackathonRoleType.ORGANIZER.value,
+        token=token,
+        expires_at=now + timedelta(days=body.invite_expires_days),
+        created_at=now,
+    )
+    db.add(invite)
+    db.commit()
+
+    magic_link = f"{_FRONTEND_BASE_URL}/hackathons/{hackathon.slug}/invites/{token}"
+    log.info(
+        "[platform-provision] hackathon=%s email=%s by=%s token=%s",
+        hackathon.slug, email, user_id, token[:8] + "...",
+    )
+
+    return {
+        "hackathon": {
+            "id": str(hackathon.id),
+            "slug": hackathon.slug,
+            "name": hackathon.name,
+            "access_code": hackathon.access_code,
+        },
+        "organizer": {
+            "user_id": user.id,
+            "email": email,
+            "name": user.name,
+        },
+        "invite": {
+            "token": token,
+            "magic_link": magic_link,
+            "expires_at": _isoformat(invite.expires_at),
+        },
+    }
+
+
 # ─── Judge link + scoring (lightweight, no-auth-required) ────────────────────
 #
 # Model: one shareable URL per hackathon (hackathon.judge_link_token). Any

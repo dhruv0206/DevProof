@@ -5,6 +5,7 @@ import { headers } from 'next/headers';
 import { auth } from '@/lib/auth';
 import { HackathonAdminLayout } from '@/components/layout/HackathonAdminLayout';
 import { PlatformAdminReissueButton } from '@/components/hackathons/PlatformAdminReissueButton';
+import { PlatformAdminCreateButton } from '@/components/hackathons/PlatformAdminCreateButton';
 import { fetchMyAdminHackathons, type AdminHackathonSummary } from '@/lib/hackathons';
 
 /**
@@ -47,19 +48,22 @@ export default async function AdminHackathonsPage() {
         ? 'Hackathons (all)'
         : 'Hackathons you organize';
     const subheading = isPlatformAdmin
-        ? 'Platform admin · every event on DevProof. Use scripts/create_organizer.py to provision new clients.'
+        ? 'Platform admin · every event on DevProof. Provision new clients with the button on the right.'
         : 'Manage events, invite judges and co-organizers, and track submissions.';
 
     return (
         <HackathonAdminLayout>
             <div className="mx-auto max-w-5xl px-6 py-12">
-                <header className="mb-10">
-                    <h1 className="text-3xl font-semibold tracking-tight">
-                        {heading}
-                    </h1>
-                    <p className="mt-2 text-sm" style={{ color: TEXT_DIM }}>
-                        {subheading}
-                    </p>
+                <header className="mb-10 flex items-start justify-between gap-4 flex-wrap">
+                    <div>
+                        <h1 className="text-3xl font-semibold tracking-tight">
+                            {heading}
+                        </h1>
+                        <p className="mt-2 text-sm" style={{ color: TEXT_DIM }}>
+                            {subheading}
+                        </p>
+                    </div>
+                    {isPlatformAdmin && <PlatformAdminCreateButton />}
                 </header>
 
                 {hackathons.length === 0 ? (
