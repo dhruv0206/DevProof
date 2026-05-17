@@ -6,17 +6,14 @@ import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import {
     AdminFilterBar,
-    type FilterState,
-} from '@/components/hackathons/AdminFilterBar';
+    type FilterState } from '@/components/hackathons/AdminFilterBar';
 import {
     SubmissionRow,
-    SubmissionRowHeader,
-} from '@/components/hackathons/SubmissionRow';
+    SubmissionRowHeader } from '@/components/hackathons/SubmissionRow';
 import type {
     AdminSubmission,
     AdminSubmissionsResponse,
-    HackathonDetail,
-} from '@/lib/types/hackathon';
+    HackathonDetail } from '@/lib/types/hackathon';
 
 const TEXT_DIM = '#666666';
 interface Props {
@@ -82,8 +79,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
     const [filter, setFilter] = useState<FilterState>({
         status: 'all',
         sort: 'score_desc',
-        search: '',
-    });
+        search: '' });
     const [publishing, setPublishing] = useState(false);
     const [confirmPublish, setConfirmPublish] = useState(false);
     const [published, setPublished] = useState(hackathon.is_published);
@@ -119,16 +115,14 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
         setPublishing(true);
         setError(null);
         try {
-            // Hit the Next.js proxy, which adds the right auth headers
-            // (X-User-Id when there's a session, X-Hackathon-Admin-Code
-            // when an admin cookie is set) before forwarding to FastAPI.
+            // Hit the Next.js proxy, which adds X-User-Id from the session
+            // before forwarding to FastAPI.
             void userId; // referenced for prop completeness; proxy reads its own session
             const res = await fetch(
                 `/api/hackathons/${hackathon.slug}/publish`,
                 {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                },
+                    headers: { 'Content-Type': 'application/json' } },
             );
             if (!res.ok && res.status !== 409) {
                 const body = await res.text();
@@ -160,8 +154,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                         marginBottom: 10,
                         display: 'flex',
                         gap: 8,
-                        flexWrap: 'wrap',
-                    }}
+                        flexWrap: 'wrap' }}
                 >
                     <span>ADMIN</span>
                     <span style={{ opacity: 0.6 }}>·</span>
@@ -175,16 +168,14 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                         alignItems: 'flex-start',
                         justifyContent: 'space-between',
                         gap: 16,
-                        flexWrap: 'wrap',
-                    }}
+                        flexWrap: 'wrap' }}
                 >
                     <div style={{ display: 'flex', alignItems: 'stretch', gap: 14 }}>
                         <div
                             style={{
                                 width: 2,
                                 background: '#EDEDED',
-                                flexShrink: 0,
-                            }}
+                                flexShrink: 0 }}
                         />
                         <div>
                             <h1
@@ -194,8 +185,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                                     fontWeight: 500,
                                     letterSpacing: '0.02em',
                                     textTransform: 'uppercase',
-                                    color: '#EDEDED',
-                                }}
+                                    color: '#EDEDED' }}
                             >
                                 {hackathon.name}
                             </h1>
@@ -204,8 +194,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                                 style={{
                                     fontSize: 11,
                                     letterSpacing: '0.04em',
-                                    marginTop: 4,
-                                }}
+                                    marginTop: 4 }}
                             >
                                 {hackathon.slug}
                             </div>
@@ -222,6 +211,11 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                         >
                             Export CSV
                         </Button>
+                        <Link href={`/hackathons/${hackathon.slug}/admin/team`}>
+                            <Button variant="outline" size="sm">
+                                Team
+                            </Button>
+                        </Link>
                         <Link href={`/hackathons/${hackathon.slug}/admin/sponsors`}>
                             <Button variant="outline" size="sm">
                                 Sponsors
@@ -251,34 +245,29 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                         marginTop: 18,
                         display: 'grid',
                         gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-                        gap: 12,
-                    }}
+                        gap: 12 }}
                 >
                     {[
                         { label: 'TOTAL', value: initial.total_count, color: '#EDEDED' },
                         {
                             label: 'COMPLETE',
                             value: initial.complete_count,
-                            color: '#00FF41',
-                        },
+                            color: '#00FF41' },
                         {
                             label: 'RUNNING',
                             value: initial.running_count,
-                            color: '#F59E0B',
-                        },
+                            color: '#F59E0B' },
                         {
                             label: 'FAILED',
                             value: initial.failed_count,
-                            color: '#EF4444',
-                        },
+                            color: '#EF4444' },
                     ].map((m) => (
                         <div
                             key={m.label}
                             style={{
                                 padding: '14px 16px',
                                 background: 'rgba(255,255,255,0.02)',
-                                border: '1px solid rgba(255,255,255,0.06)',
-                            }}
+                                border: '1px solid rgba(255,255,255,0.06)' }}
                         >
                             <div
                                 style={{
@@ -286,8 +275,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                                     color: TEXT_DIM,
                                     letterSpacing: '0.12em',
                                     textTransform: 'uppercase',
-                                    marginBottom: 6,
-                                }}
+                                    marginBottom: 6 }}
                             >
                                 {m.label}
                             </div>
@@ -297,8 +285,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                                     color: m.color,
                                     fontVariantNumeric: 'tabular-nums',
                                     letterSpacing: '-0.02em',
-                                    fontWeight: 500,
-                                }}
+                                    fontWeight: 500 }}
                             >
                                 {m.value}
                             </div>
@@ -315,16 +302,14 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                     total: initial.total_count,
                     complete: initial.complete_count,
                     running: initial.running_count,
-                    failed: initial.failed_count,
-                }}
+                    failed: initial.failed_count }}
             />
 
             {/* Table */}
             <div
                 style={{
                     border: '1px solid rgba(255,255,255,0.06)',
-                    background: 'rgba(255,255,255,0.01)',
-                }}
+                    background: 'rgba(255,255,255,0.01)' }}
             >
                 <SubmissionRowHeader />
                 {filtered.length === 0 ? (
@@ -335,8 +320,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                             textAlign: 'center',
                             color: TEXT_DIM,
                             fontSize: 12,
-                            letterSpacing: '0.04em',
-                        }}
+                            letterSpacing: '0.04em' }}
                     >
                         // no submissions match these filters
                     </div>
@@ -361,8 +345,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                         border: '1px solid rgba(239,68,68,0.3)',
                         background: 'rgba(239,68,68,0.06)',
                         color: '#fca5a5',
-                        fontSize: 12,
-                    }}
+                        fontSize: 12 }}
                 >
                     // {error}
                 </div>
@@ -379,8 +362,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        padding: 16,
-                    }}
+                        padding: 16 }}
                     onClick={() => !publishing && setConfirmPublish(false)}
                 >
                     <div
@@ -391,8 +373,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                             width: '100%',
                             background: '#0A0A0A',
                             border: '1px solid rgba(255,255,255,0.10)',
-                            padding: '28px 28px',
-                        }}
+                            padding: '28px 28px' }}
                     >
                         <div
                             className="font-mono"
@@ -401,8 +382,7 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                                 color: TEXT_DIM,
                                 letterSpacing: '0.12em',
                                 textTransform: 'uppercase',
-                                marginBottom: 8,
-                            }}
+                                marginBottom: 8 }}
                         >
                             CONFIRM · PUBLISH
                         </div>

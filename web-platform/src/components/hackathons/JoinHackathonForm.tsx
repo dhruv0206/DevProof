@@ -41,10 +41,11 @@ export function JoinHackathonForm({
         setErrorMessage(null);
 
         try {
-            const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-            const res = await fetch(`${API_URL}/api/hackathons/${encodeURIComponent(slug)}/join`, {
+            // Go through the Next proxy so the internal-proxy secret + session
+            // user-id are injected server-side (client can't carry the secret).
+            const res = await fetch(`/api/hackathons-proxy/${encodeURIComponent(slug)}/join`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ access_code: accessCode.trim() }),
             });
 

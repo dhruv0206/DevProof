@@ -13,7 +13,11 @@ export const auth = betterAuth({
     "http://localhost:3000",
   ],
   emailAndPassword: {
-    enabled: false, // GitHub only for now
+    // Used ONLY for platform-owner admins (created via scripts/create_admin.py).
+    // No sign-up endpoint is exposed — admins are CLI-provisioned, never self-serve.
+    enabled: true,
+    disableSignUp: true,
+    autoSignIn: false,
   },
   socialProviders: {
     github: {
@@ -35,8 +39,53 @@ export const auth = betterAuth({
     },
   },
   session: {
-    expiresIn: 60 * 60 * 24 * 7, // 7 days
-    updateAge: 60 * 60 * 24, // Update session every day
+    // 60 days. Hackathon organizers/judges are infrequent users — most
+    // sign in once during onboarding and don't return until weeks later.
+    // The self-serve `/hackathons/sign-in` page handles longer absences;
+    // the 60-day window covers everything in between without forcing
+    // them to re-auth mid-event. `updateAge` keeps active sessions
+    // sliding so the clock effectively resets every day they log in.
+    expiresIn: 60 * 60 * 24 * 60,
+    updateAge: 60 * 60 * 24,
+  },
+  account: {
+    accountLinking: {
+      // DISABLED ON PURPOSE — blocks the skeleton-user pre-takeover
+      // attack at the auth-library level.
+      //
+      // Threat: organizer onboarding pre-creates `emailVerified=FALSE`
+      // user rows (so non-developers can accept magic links without a
+      // GitHub account — see create_organizer.py / platform_reissue_invite).
+      // BetterAuth's DEFAULT behavior auto-links a new OAuth identity
+      // to any existing user row matching email, as long as the
+      // INCOMING OAuth provider's email is verified — it does NOT
+      // check the EXISTING row's `emailVerified` state. (Verified from
+      // BetterAuth source: `oauth2/link-account.mjs:21`.)
+      //
+      // Auto-link would mean: an operator-created skeleton for
+      // `victim@example.com` gets the victim's future GitHub OAuth
+      // silently merged into it, attaching their identity to whatever
+      // hackathon_role the operator pre-assigned. Worse, if the
+      // operator pre-clicked the magic link to mint themselves a 60-day
+      // session bound to that user.id, the victim's GitHub OAuth would
+      // attach to a row the operator already controls — full takeover.
+      //
+      // With linking disabled: the magic-link POST is the ONLY path
+      // that mints a session for a magic-link-invited user, and it
+      // atomically sets emailVerified=TRUE inside the same transaction
+      // that grants the role and mints the cookie. A separate GitHub
+      // OAuth sign-in with the same email after that point will hit
+      // BetterAuth's "account already exists" path and can be handled
+      // by an explicit "Link GitHub" flow from /settings (manual
+      // linking, not auto-merge).
+      //
+      // UX cost: a magic-link-invited user (organizer) who later wants
+      // to also use DevProof as a developer must manually link their
+      // GitHub identity from settings instead of just signing in with
+      // GitHub and seeing the accounts auto-merge. Acceptable tradeoff
+      // for closing the takeover path.
+      enabled: false,
+    },
   },
   // Use databaseHooks for reliable first-login profile population
   databaseHooks: {

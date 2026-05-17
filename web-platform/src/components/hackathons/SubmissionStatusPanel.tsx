@@ -70,10 +70,10 @@ export function SubmissionStatusPanel({
 
     const fetchOnce = async () => {
         try {
-            const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+            // Goes through the Next proxy so the internal-proxy secret + session
+            // user-id are injected server-side (client can't carry the secret).
             const res = await fetch(
-                `${API_URL}/api/hackathons/${encodeURIComponent(slug)}/submissions/${encodeURIComponent(submissionId)}`,
-                { headers: { 'X-User-Id': userId } },
+                `/api/hackathons-proxy/${encodeURIComponent(slug)}/submissions/${encodeURIComponent(submissionId)}`,
             );
             if (!res.ok) {
                 setError(`Could not load submission (status ${res.status}).`);
@@ -120,12 +120,11 @@ export function SubmissionStatusPanel({
         if (!detail || retrying) return;
         setRetrying(true);
         try {
-            const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
             const res = await fetch(
-                `${API_URL}/api/hackathons/${encodeURIComponent(slug)}/submissions/${encodeURIComponent(submissionId)}`,
+                `/api/hackathons-proxy/${encodeURIComponent(slug)}/submissions/${encodeURIComponent(submissionId)}`,
                 {
                     method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ github_url: detail.github_url }),
                 },
             );
@@ -560,12 +559,11 @@ function PinToProfileToggle({
         setErr(null);
         const next = !pinned;
         try {
-            const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
             const res = await fetch(
-                `${API_URL}/api/hackathons/${encodeURIComponent(slug)}/submissions/${encodeURIComponent(submissionId)}/pin`,
+                `/api/hackathons-proxy/${encodeURIComponent(slug)}/submissions/${encodeURIComponent(submissionId)}/pin`,
                 {
                     method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ pinned: next }),
                 },
             );

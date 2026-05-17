@@ -18,6 +18,7 @@ import Link from 'next/link';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { AuthRequiredModal } from '@/components/shared/AuthRequiredModal';
 import { SubmitForm } from '@/components/hackathons/SubmitForm';
+import { API_BASE_URL, buildProxyHeaders } from '@/lib/internal-proxy';
 
 const TEXT_DIM = '#666666';
 const CORNER = 'rgba(255,255,255,0.18)';
@@ -40,12 +41,12 @@ interface AuthedEvent {
     };
 }
 
-async function fetchEventForUser(slug: string, userId: string | null): Promise<AuthedEvent | null> {
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+async function fetchEventForUser(slug: string, _userId: string | null): Promise<AuthedEvent | null> {
     try {
-        const res = await fetch(`${API_URL}/api/hackathons/${encodeURIComponent(slug)}`, {
+        const fwdHeaders = await buildProxyHeaders({ noContentType: true });
+        const res = await fetch(`${API_BASE_URL}/api/hackathons/${encodeURIComponent(slug)}`, {
             cache: 'no-store',
-            headers: userId ? { 'X-User-Id': userId } : undefined,
+            headers: fwdHeaders,
         });
         if (!res.ok) return null;
         return (await res.json()) as AuthedEvent;

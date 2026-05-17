@@ -9,18 +9,17 @@ import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
 import { auth } from '@/lib/auth';
 import { SponsorLeaderboardClient } from '@/components/hackathons/SponsorLeaderboardClient';
-import { fetchHackathon, fetchAdminSubmissions, hasAdminCookie } from '@/lib/hackathons';
+import { fetchHackathon, fetchAdminSubmissions} from '@/lib/hackathons';
 
 export default async function HackathonSponsorsPage({
-    params,
-}: {
+    params }: {
     params: Promise<{ slug: string }>;
 }) {
     const { slug } = await params;
     const session = await auth.api.getSession({ headers: await headers() });
-    const hasCookie = await hasAdminCookie(slug);
+    const hasCookie = await(slug);
     if (!session?.user && !hasCookie) {
-        redirect(`/hackathons/${slug}/admin/login`);
+        redirect(`/hackathons/${slug}`);
     }
     const hackathon = await fetchHackathon(slug);
     if (!hackathon) {

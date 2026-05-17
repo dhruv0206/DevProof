@@ -103,8 +103,6 @@ export function SubmitForm({
 
         setSubmitting(true);
         try {
-            const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
             // Coerce tag fields from comma strings to string[].
             const builtExtras: Record<string, unknown> = {};
             for (const [k, v] of Object.entries(extras)) {
@@ -119,11 +117,13 @@ export function SubmitForm({
                 }
             }
 
+            // Goes through the Next proxy so the internal-proxy secret + session
+            // user-id are injected server-side (client can't carry the secret).
             const res = await fetch(
-                `${API_URL}/api/hackathons/${encodeURIComponent(slug)}/submissions`,
+                `/api/hackathons-proxy/${encodeURIComponent(slug)}/submissions`,
                 {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         github_url: githubUrl.trim(),
                         extras: builtExtras,
