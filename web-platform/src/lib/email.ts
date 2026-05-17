@@ -138,6 +138,74 @@ changes were made to your account.
 }
 
 
+/**
+ * Sends a team-invite email when a submitter invites a teammate by email.
+ *
+ * Subject + body kept short on purpose — the recipient lands on the invite
+ * page, sees full hackathon + submission context there, and confirms in one
+ * click. Email is the trigger, not the spec.
+ */
+export async function sendTeamInviteEmail({
+    to,
+    magicLink,
+    inviterName,
+    hackathonName,
+}: {
+    to: string;
+    magicLink: string;
+    inviterName?: string;
+    hackathonName?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+    const fromBit = inviterName
+        ? `${inviterName} invited you`
+        : 'You’ve been invited';
+    const eventBit = hackathonName ? ` to their ${hackathonName} team` : ' to join a hackathon team';
+
+    const text = `${fromBit}${eventBit} on DevProof.
+
+Open the link below to view the project and accept. The link is single-use
+and expires in 7 days.
+
+  ${magicLink}
+
+If you weren't expecting this, ignore the email — no changes will be made
+to your account.
+
+— DevProof Hackathons`;
+
+    const html = `<!doctype html>
+<html>
+  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 32px auto; padding: 0 24px; color: #111;">
+    <p style="font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: #888; margin: 0 0 24px;">DevProof &middot; Team invite</p>
+    <h1 style="font-size: 22px; font-weight: 600; margin: 0 0 12px;">${escapeHtml(fromBit + eventBit)}</h1>
+    <p style="font-size: 14px; line-height: 1.55; color: #444;">
+      Open the link below to view the project and accept. The invite is single-use and expires in 7 days.
+    </p>
+    <p style="margin: 24px 0;">
+      <a href="${magicLink}" style="display: inline-block; background: #CC785C; color: #fff; padding: 10px 22px; border-radius: 6px; font-size: 14px; font-weight: 500; text-decoration: none;">View invite</a>
+    </p>
+    <p style="font-size: 12px; line-height: 1.55; color: #777;">
+      Or copy this link into your browser:<br />
+      <span style="font-family: ui-monospace, SFMono-Regular, monospace; color: #444; word-break: break-all;">${escapeHtml(magicLink)}</span>
+    </p>
+    <hr style="border: none; border-top: 1px solid #eee; margin: 32px 0;" />
+    <p style="font-size: 12px; color: #999;">
+      If you weren't expecting this, ignore the email — no changes will be made to your account.
+    </p>
+  </body>
+</html>`;
+
+    return sendEmail({
+        to,
+        subject: hackathonName
+            ? `You're invited to a ${hackathonName} team`
+            : 'You\'re invited to a hackathon team on DevProof',
+        html,
+        text,
+    });
+}
+
+
 function escapeHtml(s: string): string {
     return s.replace(/[&<>"']/g, (c) => ({
         '&': '&amp;',

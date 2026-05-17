@@ -43,12 +43,22 @@ export interface HackathonDetail {
     submission_count: number;
     your_role: HackathonRole | null;
     your_submission_id: string | null;
+    /** "submitter" | "teammate" — only present when your_submission_id is set.
+     * Distinguishes the original submitter from an accepted teammate so the
+     * UI can hide invite-management actions for teammates. */
+    your_submission_role?: 'submitter' | 'teammate' | null;
     /** Short participant-join code. Present ONLY when your_role is
      * organizer/judge — the public listing strips it. */
     access_code?: string;
     /** Whether the organizer has enabled sponsor-evidence display on
      * the judging-detail view. Admin-only field. */
     show_sponsor_evidence?: boolean;
+    /** Effective lock state: true iff submissions are currently closed for
+     * edits (either scheduled close passed OR manual override on). */
+    submissions_locked?: boolean;
+    /** Organizer-only: the manual override toggle state, exposed separately
+     * from `submissions_locked` so the admin UI can render the toggle. */
+    submissions_locked_override?: boolean;
 }
 
 /** A row in the organizer admin table (endpoint #7). */

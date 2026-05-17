@@ -10,6 +10,7 @@ import {
 import {
     SubmissionRow,
     SubmissionRowHeader } from '@/components/hackathons/SubmissionRow';
+import { SubmissionLockControl } from '@/components/hackathons/SubmissionLockControl';
 import type {
     AdminSubmission,
     AdminSubmissionsResponse,
@@ -248,6 +249,16 @@ export function AdminDashboardClient({ hackathon, initial, userId }: Props) {
                     <DeveloperJoinStrip
                         slug={hackathon.slug}
                         accessCode={hackathon.access_code}
+                    />
+                )}
+
+                {/* Submission lock — organizer-only control over the edit window. */}
+                {hackathon.your_role === 'organizer' && (
+                    <SubmissionLockControl
+                        slug={hackathon.slug}
+                        initialLockedOverride={hackathon.submissions_locked_override ?? false}
+                        initialCloseAt={hackathon.submissions_close_at ?? null}
+                        initialLockedEffective={hackathon.submissions_locked ?? false}
                     />
                 )}
 

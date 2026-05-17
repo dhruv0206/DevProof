@@ -70,6 +70,15 @@ class Hackathon(Base):
     judging_starts_at = Column(DateTime, nullable=True)
     ends_at = Column(DateTime, nullable=True)
 
+    # Organizer-controlled manual lock. Combined with submissions_close_at via
+    # OR: a submission is editable iff override=False AND now <= close_at.
+    # Lets the organizer instantly freeze submissions (e.g. "judging starts NOW")
+    # without waiting for the scheduled close, or extend by unsetting + bumping
+    # close_at.
+    submissions_locked_override = Column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
+
     # Single shared join code per event. Per-participant codes are v2.
     access_code = Column(String(32), nullable=False, unique=True)
 
@@ -172,10 +181,23 @@ class HackathonSubmission(Base):
     #   "problem_statement": "..."
     # }
 
-    # Team members as a list of GitHub usernames (NOT user_ids — we link
-    # to existing users at display time via `User.githubUsername`, and
-    # auto-link new sign-ups whose GitHub username appears in any team
-    # list when they OAuth in for the first time).
+    # First-class submission fields (added 2026-05-17). Previously inferred
+    # from extras_json — promoted for validation + indexability.
+    tagline = Column(String(140), nullable=True)            # one-line pitch
+    what_it_does = Column(String(500), nullable=True)       # paragraph for judges
+    demo_url = Column(String(500), nullable=True)           # deployed app URL
+    team_name = Column(String(80), nullable=True)           # null = solo submission
+
+    # Sponsor names this team has opted OUT of competing for (hybrid track
+    # model: auto-detected sponsors apply by default; team can exclude
+    # specific ones — e.g. "we used Stripe for auth, don't put us on the
+    # Stripe leaderboard"). Shape: ["Stripe", "OpenAI"].
+    tracks_opted_out_json = Column(
+        JSON, nullable=False, default=list, server_default="[]",
+    )
+
+    # Legacy free-text teammate display list (GitHub usernames). Kept for
+    # backwards compat; new structured invites flow through HackathonTeamMember.
     team_members_json = Column(JSON, nullable=False, default=list)
 
     # Sponsors matched against this submission's audit (cross-reference of
@@ -319,6 +341,75 @@ class HackathonJudgeScore(Base):
     )
 
 
+# ─── HackathonTeamMember ──────────────────────────────────────────────────────
+
+class TeamMemberStatus(str, Enum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    REVOKED = "revoked"
+
+
+class HackathonTeamMember(Base):
+    """Invite-based teammate record. One row per invitation.
+
+    A teammate is invited via username OR email. On accept, the teammate
+    gains full edit rights on the submission (same as the submitter) AND
+    the parent hackathon surfaces on their personal /me/hackathons view.
+
+    Lifecycle: pending -> accepted | declined | revoked. Expiry is enforced
+    at the application layer via expires_at comparison. Revocation is
+    organizer/submitter-initiated; declined is invitee-initiated; accepted
+    is the happy path that grants edit access.
+    """
+    __tablename__ = "hackathon_team_member"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    submission_id = Column(
+        UUID(as_uuid=True), ForeignKey("hackathon_submission.id"), nullable=False,
+    )
+
+    # Identifier captured at invite time. Either one is set (CHECK constraint
+    # enforced in DB).
+    invited_user_id = Column(String, ForeignKey("user.id"), nullable=True)
+    invited_email = Column(String, nullable=True)
+
+    # Resolved on accept. For username invites this matches invited_user_id;
+    # for email invites it's populated when the recipient signs in.
+    accepted_user_id = Column(String, ForeignKey("user.id"), nullable=True)
+
+    invite_token = Column(String, nullable=False, unique=True)
+    status = Column(String(16), nullable=False, default=TeamMemberStatus.PENDING.value)
+
+    invited_by = Column(String, ForeignKey("user.id"), nullable=False)
+    invited_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False,
+    )
+    accepted_at = Column(DateTime, nullable=True)
+    declined_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        Index("ix_team_member_submission", "submission_id"),
+        Index("ix_team_member_accepted_user", "accepted_user_id"),
+        Index("ix_team_member_token", "invite_token"),
+        Index("ix_team_member_invited_user", "invited_user_id"),
+        Index("ix_team_member_invited_email", "invited_email"),
+    )
+
+    @property
+    def is_active(self) -> bool:
+        """Pending and not yet expired."""
+        if self.status != TeamMemberStatus.PENDING.value:
+            return False
+        expires = self.expires_at
+        if expires is not None and expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        return expires is None or expires > datetime.now(timezone.utc)
+
+
 __all__ = [
     "Hackathon",
     "HackathonRole",
@@ -326,6 +417,8 @@ __all__ = [
     "HackathonSubmission",
     "HackathonInvite",
     "HackathonJudgeScore",
+    "HackathonTeamMember",
+    "TeamMemberStatus",
     "SubmissionStatus",
     "AuditStatus",
 ]

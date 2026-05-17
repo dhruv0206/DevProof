@@ -16,6 +16,8 @@ import Link from 'next/link';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { AuthRequiredModal } from '@/components/shared/AuthRequiredModal';
 import { SubmissionStatusPanel } from '@/components/hackathons/SubmissionStatusPanel';
+import { TeamInviteManager } from '@/components/hackathons/TeamInviteManager';
+import { TracksOptOutControl } from '@/components/hackathons/TracksOptOutControl';
 import { API_BASE_URL, buildProxyHeaders } from '@/lib/internal-proxy';
 
 const TEXT_DIM = '#666666';
@@ -25,8 +27,10 @@ interface AuthedEvent {
     slug: string;
     name: string;
     submissions_close_at: string;
+    submissions_locked?: boolean;
     your_role: 'organizer' | 'judge' | 'participant' | null;
     your_submission_id: string | null;
+    your_submission_role?: 'submitter' | 'teammate' | null;
 }
 
 async function fetchEventForUser(slug: string, _userId: string | null): Promise<AuthedEvent | null> {
@@ -111,7 +115,15 @@ export default async function HackathonMePage({
     }
 
     const closesAt = new Date(event.submissions_close_at);
-    const canEdit = closesAt.getTime() > Date.now();
+    // Effective lock = whatever backend computed (combines scheduled close +
+    // organizer manual override), falling back to scheduled-close-only if the
+    // backend hasn't been updated yet.
+    const submissionsLocked =
+        typeof event.submissions_locked === 'boolean'
+            ? event.submissions_locked
+            : closesAt.getTime() < Date.now();
+    const canEdit = !submissionsLocked;
+    const isSubmitter = event.your_submission_role === 'submitter';
 
     return (
         <DashboardLayout>
@@ -177,6 +189,24 @@ export default async function HackathonMePage({
                     canEdit={canEdit}
                     userId={session.user.id}
                 />
+
+                <div style={{ marginTop: 24 }}>
+                    <TeamInviteManager
+                        slug={slug}
+                        submissionId={event.your_submission_id!}
+                        isSubmitter={isSubmitter}
+                        submissionsLocked={submissionsLocked}
+                    />
+                </div>
+
+                <div style={{ marginTop: 24 }}>
+                    <TracksOptOutControl
+                        slug={slug}
+                        submissionId={event.your_submission_id!}
+                        isEditor={canEdit}
+                        submissionsLocked={submissionsLocked}
+                    />
+                </div>
 
                 <div style={{ marginTop: 36 }}>
                     <Link

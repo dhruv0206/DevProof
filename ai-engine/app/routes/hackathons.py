@@ -51,7 +51,9 @@ from app.models.hackathon import (
     HackathonRole,
     HackathonRoleType,
     HackathonSubmission,
+    HackathonTeamMember,
     SubmissionStatus,
+    TeamMemberStatus,
 )
 from app.models.project import Project, ProjectAudit
 from app.models.user import User
@@ -260,6 +262,43 @@ def _get_hackathon_by_slug(db: Session, slug: str) -> Hackathon:
     return h
 
 
+def _submissions_are_locked(hackathon: Hackathon) -> bool:
+    """True iff submissions are currently locked from edits.
+
+    Two independent gates, either of which locks the event:
+
+      1. ``submissions_locked_override`` (manual organizer toggle) — instant
+         lock regardless of schedule.
+      2. ``submissions_close_at`` — scheduled deadline. Once passed, edits
+         and new submissions are blocked.
+
+    Callers should treat the lock as advisory for new submissions (return 422
+    "submissions are closed") and as strict for edits (return 409 with the
+    same message). The split is conventional but both call _submissions_are_locked
+    underneath so the policy stays in one place.
+    """
+    if bool(getattr(hackathon, "submissions_locked_override", False)):
+        return True
+    close_at = hackathon.submissions_close_at
+    if close_at is None:
+        return False
+    if close_at.tzinfo is None:
+        close_at = close_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) > close_at
+
+
+def _require_submissions_open(
+    hackathon: Hackathon,
+    *,
+    code: int = 409,
+    detail: str = "Submissions are locked",
+) -> None:
+    """Raise HTTPException if submissions are locked. Default 409 (edit
+    attempt); pass code=422 for the create endpoint."""
+    if _submissions_are_locked(hackathon):
+        raise HTTPException(status_code=code, detail=detail)
+
+
 # ─── Validation helpers ───────────────────────────────────────────────────────
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -401,6 +440,12 @@ def _serialize_submission(
         "github_url": sub.github_url,
         "extras": sub.extras_json or {},
         "team_members": sub.team_members_json or [],
+        # New first-class fields (added 2026-05-17).
+        "tagline": sub.tagline,
+        "what_it_does": sub.what_it_does,
+        "demo_url": sub.demo_url,
+        "team_name": sub.team_name,
+        "tracks_opted_out": list(sub.tracks_opted_out_json or []),
         "submission_status": sub.submission_status,
         "audit_status": sub.audit_status,
         "audit_error": sub.audit_error,
@@ -707,12 +752,24 @@ class CreateSubmissionRequest(BaseModel):
     github_url: str = Field(min_length=10, max_length=500)
     extras: dict[str, Any] = Field(default_factory=dict)
     team_members: list[str] = Field(default_factory=list)
+    # New first-class fields (added 2026-05-17). All optional on create so
+    # devs can save a draft-quality submission and edit later.
+    tagline: Optional[str] = Field(default=None, max_length=140)
+    what_it_does: Optional[str] = Field(default=None, max_length=500)
+    demo_url: Optional[str] = Field(default=None, max_length=500)
+    team_name: Optional[str] = Field(default=None, max_length=80)
+    tracks_opted_out: list[str] = Field(default_factory=list)
 
 
 class UpdateSubmissionRequest(BaseModel):
     github_url: Optional[str] = Field(default=None, min_length=10, max_length=500)
     extras: Optional[dict[str, Any]] = None
     team_members: Optional[list[str]] = None
+    tagline: Optional[str] = Field(default=None, max_length=140)
+    what_it_does: Optional[str] = Field(default=None, max_length=500)
+    demo_url: Optional[str] = Field(default=None, max_length=500)
+    team_name: Optional[str] = Field(default=None, max_length=80)
+    tracks_opted_out: Optional[list[str]] = None
 
 
 # ─── Endpoint 1: Create event ─────────────────────────────────────────────────
@@ -910,20 +967,41 @@ def list_my_hackathons(
     role_rows = db.query(HackathonRole).filter(
         HackathonRole.user_id == user_id,
     ).all()
-    if not role_rows:
+
+    # Team-membership lookup: hackathons where the user has accepted a
+    # teammate invite, even if they have no direct role row yet (the accept
+    # path grants a role too, so this is just defensive coverage of edge
+    # cases where the role insert failed but the team_member row succeeded).
+    team_subs = db.query(HackathonSubmission).join(
+        HackathonTeamMember,
+        HackathonTeamMember.submission_id == HackathonSubmission.id,
+    ).filter(
+        HackathonTeamMember.accepted_user_id == user_id,
+        HackathonTeamMember.status == TeamMemberStatus.ACCEPTED.value,
+    ).all()
+
+    if not role_rows and not team_subs:
         return {"events": []}
 
-    hackathon_ids = [r.hackathon_id for r in role_rows]
     role_by_hid = {r.hackathon_id: r.role for r in role_rows}
+    hackathon_id_set = set(role_by_hid)
+    hackathon_id_set.update(s.hackathon_id for s in team_subs)
+    hackathon_ids = list(hackathon_id_set)
+    if not hackathon_ids:
+        return {"events": []}
 
     hackathons = db.query(Hackathon).filter(Hackathon.id.in_(hackathon_ids)).all()
 
-    # Pull this user's submission per event (if any)
-    sub_rows = db.query(HackathonSubmission).filter(
+    # The user's "primary" submission for each event = the one they submitted
+    # themselves, OR (fallback) the team submission they're a member of.
+    own_subs = db.query(HackathonSubmission).filter(
         HackathonSubmission.hackathon_id.in_(hackathon_ids),
         HackathonSubmission.submitter_user_id == user_id,
     ).all()
-    sub_by_hid = {s.hackathon_id: s for s in sub_rows}
+    sub_by_hid: dict[Any, HackathonSubmission] = {s.hackathon_id: s for s in own_subs}
+    for s in team_subs:
+        sub_by_hid.setdefault(s.hackathon_id, s)
+    sub_rows = list(sub_by_hid.values())
 
     # Audits for those submissions
     audit_by_pid: dict[uuid.UUID, ProjectAudit] = {}
@@ -995,6 +1073,7 @@ def get_hackathon(
 
     your_role: Optional[str] = None
     your_submission_id: Optional[str] = None
+    your_submission_role: Optional[str] = None  # "submitter" | "teammate" | None
     if user_id:
         role_row = db.query(HackathonRole).filter(
             HackathonRole.hackathon_id == h.id,
@@ -1003,12 +1082,28 @@ def get_hackathon(
         if role_row is not None:
             your_role = role_row.role
 
+        # Own submission takes precedence over team membership.
         sub_row = db.query(HackathonSubmission).filter(
             HackathonSubmission.hackathon_id == h.id,
             HackathonSubmission.submitter_user_id == user_id,
         ).first()
         if sub_row is not None:
             your_submission_id = str(sub_row.id)
+            your_submission_role = "submitter"
+        else:
+            # Fall back to a team membership (accepted teammates land on
+            # the same /me page and edit the submitter's submission).
+            team_sub = db.query(HackathonSubmission).join(
+                HackathonTeamMember,
+                HackathonTeamMember.submission_id == HackathonSubmission.id,
+            ).filter(
+                HackathonSubmission.hackathon_id == h.id,
+                HackathonTeamMember.accepted_user_id == user_id,
+                HackathonTeamMember.status == TeamMemberStatus.ACCEPTED.value,
+            ).first()
+            if team_sub is not None:
+                your_submission_id = str(team_sub.id)
+                your_submission_role = "teammate"
 
     # Strip ``packages`` from public sponsor list — only name + prize visible
     public_sponsors = [
@@ -1044,11 +1139,21 @@ def get_hackathon(
         "submission_count": submission_count,
         "your_role": your_role,
         "your_submission_id": your_submission_id,
+        "your_submission_role": your_submission_role,
+        # Effective lock state — true iff submissions are currently closed for
+        # edits (scheduled close passed OR manual override on). Drives the
+        # UI's edit-button visibility and read-only banners.
+        "submissions_locked": _submissions_are_locked(h),
     }
     if your_role in ("organizer", "judge"):
         response["access_code"] = h.access_code
         response["show_sponsor_evidence"] = bool(
             (h.settings_json or {}).get("show_sponsor_evidence")
+        )
+        # Organizer-only: surface the lock components separately so the admin
+        # UI can render the toggle state + scheduled close field distinctly.
+        response["submissions_locked_override"] = bool(
+            h.submissions_locked_override
         )
     return response
 
@@ -1113,16 +1218,10 @@ def create_submission(
     role = _require_role(db, h.id, user_id, HackathonRoleType.PARTICIPANT.value)
     _validate_github_url(body.github_url)
 
-    # Deadline check
-    if h.submissions_close_at is not None:
-        deadline = h.submissions_close_at
-        if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
-        if _now() > deadline:
-            raise HTTPException(
-                status_code=422,
-                detail="Submissions are closed for this event",
-            )
+    # Submission window: scheduled close OR organizer manual lock.
+    _require_submissions_open(
+        h, code=422, detail="Submissions are closed for this event",
+    )
 
     # Required-extras check
     settings = h.settings_json or {}
@@ -1171,6 +1270,13 @@ def create_submission(
         github_url=body.github_url,
         extras_json=body.extras or {},
         team_members_json=cleaned_team,
+        tagline=(body.tagline or "").strip() or None,
+        what_it_does=(body.what_it_does or "").strip() or None,
+        demo_url=(body.demo_url or "").strip() or None,
+        team_name=(body.team_name or "").strip() or None,
+        tracks_opted_out_json=[
+            t.strip() for t in (body.tracks_opted_out or []) if t and t.strip()
+        ],
         submission_status=SubmissionStatus.SUBMITTED.value,
         audit_status=AuditStatus.PENDING.value,
         submitted_at=_now(),
@@ -1229,22 +1335,25 @@ def update_submission(
     if sub is None:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    if sub.submitter_user_id != user_id:
+    # Edit gate: submitter OR accepted teammate may edit (full-edit policy).
+    is_authorized_editor = sub.submitter_user_id == user_id
+    if not is_authorized_editor:
+        teammate = db.query(HackathonTeamMember).filter(
+            HackathonTeamMember.submission_id == sub.id,
+            HackathonTeamMember.accepted_user_id == user_id,
+            HackathonTeamMember.status == TeamMemberStatus.ACCEPTED.value,
+        ).first()
+        if teammate is not None:
+            is_authorized_editor = True
+
+    if not is_authorized_editor:
         raise HTTPException(
             status_code=403,
-            detail="Only the submitter can update this submission",
+            detail="Only the submitter or an accepted teammate can update this submission",
         )
 
-    # Deadline lock
-    if h.submissions_close_at is not None:
-        deadline = h.submissions_close_at
-        if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
-        if _now() > deadline:
-            raise HTTPException(
-                status_code=409,
-                detail="Submissions are locked — deadline has passed",
-            )
+    # Lock gate (scheduled close OR manual override).
+    _require_submissions_open(h, code=409)
 
     settings = h.settings_json or {}
     repo_changed = False
@@ -1275,6 +1384,21 @@ def update_submission(
         sub.team_members_json = [
             m.strip() for m in body.team_members
             if m and m.strip() and m.strip() != submitter_username
+        ]
+
+    # First-class fields (2026-05-17). Empty string -> NULL so blanking out
+    # in the UI clears the column rather than persisting "".
+    if body.tagline is not None:
+        sub.tagline = body.tagline.strip() or None
+    if body.what_it_does is not None:
+        sub.what_it_does = body.what_it_does.strip() or None
+    if body.demo_url is not None:
+        sub.demo_url = body.demo_url.strip() or None
+    if body.team_name is not None:
+        sub.team_name = body.team_name.strip() or None
+    if body.tracks_opted_out is not None:
+        sub.tracks_opted_out_json = [
+            t.strip() for t in body.tracks_opted_out if t and t.strip()
         ]
 
     sub.updated_at = _now()
@@ -1564,38 +1688,56 @@ def get_leaderboard(
             continue
         submitter = users_by_id.get(r.submitter_user_id)
         matched = r.matched_sponsors_json or {}
+        opted_out = {
+            t.strip().lower()
+            for t in (r.tracks_opted_out_json or [])
+            if isinstance(t, str) and t.strip()
+        }
         items.append({
             "submission_id": str(r.id),
             "submitter_username": (
                 submitter.githubUsername if submitter else None
             ),
+            "team_name": r.team_name,
             "team_members": r.team_members_json or [],
             "github_url": r.github_url,
+            "tagline": r.tagline,
             "repo_score": audit.v4_score,
             "repo_tier": audit.v4_tier,
             "matched_sponsors": {k: len(v) for k, v in matched.items()},
+            # Internal use only — stripped from the public payload below.
+            "_tracks_opted_out": opted_out,
         })
 
     items.sort(key=lambda x: x["repo_score"] or 0, reverse=True)
-    rankings = [{"rank": i + 1, **it} for i, it in enumerate(items)]
+    rankings = [
+        {"rank": i + 1, **{k: v for k, v in it.items() if not k.startswith("_")}}
+        for i, it in enumerate(items)
+    ]
 
-    # Per-sponsor leaderboards
+    # Per-sponsor leaderboards. Submissions that opted out of a given
+    # sponsor's track are excluded from that sponsor's board (their score
+    # still appears on the overall leaderboard unchanged).
     sponsor_boards: dict[str, list[dict[str, Any]]] = {}
     for sponsor in h.sponsors_json or []:
         if not isinstance(sponsor, dict) or not sponsor.get("name"):
             continue
         sname = sponsor["name"]
+        sname_low = sname.strip().lower()
         sponsor_items = [
             {
                 "submission_id": it["submission_id"],
                 "submitter_username": it["submitter_username"],
+                "team_name": it["team_name"],
                 "github_url": it["github_url"],
+                "tagline": it["tagline"],
                 "repo_score": it["repo_score"],
                 "repo_tier": it["repo_tier"],
                 "claim_count": it["matched_sponsors"].get(sname, 0),
             }
             for it in items
             if sname in (it.get("matched_sponsors") or {})
+            and sname_low not in it["_tracks_opted_out"]
         ]
         sponsor_items.sort(
             key=lambda x: (x["claim_count"], x["repo_score"] or 0),
@@ -2030,6 +2172,497 @@ def remove_member(
     db.delete(row)
     db.commit()
     return None
+
+
+# ─── Endpoints: Submission team-member invites ────────────────────────────────
+#
+# Two-tier invitation flow that mirrors hackathon_invite but operates at the
+# submission level. A submitter can invite teammates by either DevProof
+# username or email. On accept, the invitee:
+#
+#   1. Becomes an "accepted_user_id" on a hackathon_team_member row, granting
+#      full edit rights on the submission.
+#   2. Gets a participant role on the hackathon (if not already), so the
+#      event surfaces on their /me/hackathons dashboard.
+#
+# Tokens are single-use, 7-day expiry, revocable. Same security model as
+# the existing hackathon_invite endpoints.
+
+
+def _resolve_invite_target(
+    db: Session, identifier: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a free-text identifier into (invited_user_id, invited_email).
+
+    Heuristic: contains "@" -> treat as email; otherwise look up by
+    githubUsername. Username lookup is *required* to resolve to a user;
+    email lookup is *not* — an unrecognized email becomes a deferred-resolve
+    invite the recipient can claim on first sign-in.
+
+    Email values are normalized to lowercase to match BetterAuth's storage
+    convention.
+    """
+    ident = (identifier or "").strip()
+    if not ident:
+        raise HTTPException(
+            status_code=422,
+            detail="Teammate identifier (username or email) is required",
+        )
+    if "@" in ident:
+        email = ident.lower()
+        # Don't require resolution — email invites work for non-DevProof users.
+        existing = db.query(User).filter(User.email == email).first()
+        return (existing.id if existing else None, email)
+
+    # Username lookup — case-insensitive on githubUsername.
+    user = db.query(User).filter(
+        func.lower(User.githubUsername) == ident.lstrip("@").lower(),
+    ).first()
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No DevProof user with username '{ident}'. Try inviting by email instead.",
+        )
+    return (user.id, None)
+
+
+def _serialize_team_member(
+    row: HackathonTeamMember,
+    *,
+    user: Optional[User] = None,
+    hackathon_slug: Optional[str] = None,
+) -> dict[str, Any]:
+    """Outward shape used by both list + create endpoints."""
+    accepted_user_info: Optional[dict[str, Any]] = None
+    if user is not None:
+        accepted_user_info = {
+            "user_id": user.id,
+            "username": user.githubUsername,
+            "name": user.name,
+            "email": user.email,
+        }
+    return {
+        "id": str(row.id),
+        "submission_id": str(row.submission_id),
+        "invited_user_id": row.invited_user_id,
+        "invited_email": row.invited_email,
+        "accepted_user_id": row.accepted_user_id,
+        "status": row.status,
+        "invited_by": row.invited_by,
+        "invited_at": _isoformat(row.invited_at),
+        "accepted_at": _isoformat(row.accepted_at),
+        "declined_at": _isoformat(row.declined_at),
+        "revoked_at": _isoformat(row.revoked_at),
+        "expires_at": _isoformat(row.expires_at),
+        "magic_link": (
+            f"{_FRONTEND_BASE_URL}/hackathons/{hackathon_slug}/team-invites/{row.invite_token}"
+            if hackathon_slug else None
+        ),
+        "accepted_user": accepted_user_info,
+    }
+
+
+class TeamInviteCreateRequest(BaseModel):
+    identifier: str = Field(min_length=1, max_length=255)
+
+
+def _load_submission_for_team_op(
+    db: Session, slug: str, submission_id: str,
+) -> tuple[Hackathon, HackathonSubmission]:
+    """Resolve (hackathon, submission) or raise 404."""
+    try:
+        sub_uuid = uuid.UUID(submission_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=404, detail="Submission not found")
+    h = _get_hackathon_by_slug(db, slug)
+    sub = db.query(HackathonSubmission).filter(
+        HackathonSubmission.id == sub_uuid,
+        HackathonSubmission.hackathon_id == h.id,
+    ).first()
+    if sub is None:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return h, sub
+
+
+@router.post("/{slug}/submissions/{submission_id}/team/invites", status_code=201)
+def create_team_invite(
+    slug: str,
+    submission_id: str,
+    body: TeamInviteCreateRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Submitter-only. Invite a teammate by DevProof username or email.
+
+    Returns the invite row including the magic-link URL the submitter can
+    copy/share. The frontend may also trigger an automatic email send via
+    its own proxy layer when an email identifier is supplied.
+    """
+    h, sub = _load_submission_for_team_op(db, slug, submission_id)
+    if sub.submitter_user_id != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the submitter can invite teammates",
+        )
+    _require_submissions_open(h, code=409)
+
+    invited_uid, invited_email = _resolve_invite_target(db, body.identifier)
+    if invited_uid == user_id:
+        raise HTTPException(
+            status_code=422,
+            detail="You can't invite yourself — you're already on this submission",
+        )
+
+    # Block duplicate invites: an existing pending or accepted row for this
+    # (submission, target) pair makes a new one pointless. Allow re-invite
+    # after decline/revoke/expiry.
+    duplicate_q = db.query(HackathonTeamMember).filter(
+        HackathonTeamMember.submission_id == sub.id,
+        HackathonTeamMember.status.in_([
+            TeamMemberStatus.PENDING.value,
+            TeamMemberStatus.ACCEPTED.value,
+        ]),
+    )
+    if invited_uid:
+        duplicate_q = duplicate_q.filter(
+            (HackathonTeamMember.invited_user_id == invited_uid)
+            | (HackathonTeamMember.accepted_user_id == invited_uid)
+        )
+    else:
+        duplicate_q = duplicate_q.filter(
+            HackathonTeamMember.invited_email == invited_email
+        )
+    if duplicate_q.first() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="That user/email already has an active or accepted invite",
+        )
+
+    # Optional team size cap (defined per-hackathon settings.max_team_size).
+    # Counts: submitter (1) + accepted teammates + pending teammates.
+    settings = h.settings_json or {}
+    max_team_size = settings.get("max_team_size")
+    if max_team_size:
+        already = db.query(HackathonTeamMember).filter(
+            HackathonTeamMember.submission_id == sub.id,
+            HackathonTeamMember.status.in_([
+                TeamMemberStatus.PENDING.value,
+                TeamMemberStatus.ACCEPTED.value,
+            ]),
+        ).count()
+        if 1 + already + 1 > int(max_team_size):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Inviting would exceed the team-size cap ({max_team_size})",
+            )
+
+    # Mint a fresh token (collisions are astronomically unlikely but checked).
+    token = secrets.token_urlsafe(24)
+    while db.query(HackathonTeamMember).filter(
+        HackathonTeamMember.invite_token == token,
+    ).first():
+        token = secrets.token_urlsafe(24)
+
+    from datetime import timedelta
+    now = _now()
+    row = HackathonTeamMember(
+        submission_id=sub.id,
+        invited_user_id=invited_uid,
+        invited_email=invited_email,
+        invite_token=token,
+        status=TeamMemberStatus.PENDING.value,
+        invited_by=user_id,
+        invited_at=now,
+        expires_at=now + timedelta(days=7),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    log.info(
+        "[team-invite] created submission=%s identifier=%s token=%s by=%s",
+        sub.id, body.identifier, token[:8] + "...", user_id,
+    )
+    return _serialize_team_member(row, hackathon_slug=slug)
+
+
+@router.get("/{slug}/submissions/{submission_id}/team")
+def list_submission_team(
+    slug: str,
+    submission_id: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """List the submission's accepted teammates + pending invites.
+
+    Authorized: submitter, accepted teammates, organizers, and judges.
+    Returns the full team-member roster annotated with user info where
+    available.
+    """
+    h, sub = _load_submission_for_team_op(db, slug, submission_id)
+
+    is_authorized = sub.submitter_user_id == user_id
+    if not is_authorized:
+        teammate = db.query(HackathonTeamMember).filter(
+            HackathonTeamMember.submission_id == sub.id,
+            HackathonTeamMember.accepted_user_id == user_id,
+            HackathonTeamMember.status == TeamMemberStatus.ACCEPTED.value,
+        ).first()
+        if teammate is not None:
+            is_authorized = True
+    if not is_authorized:
+        staff = db.query(HackathonRole).filter(
+            HackathonRole.hackathon_id == h.id,
+            HackathonRole.user_id == user_id,
+            HackathonRole.role.in_([
+                HackathonRoleType.ORGANIZER.value,
+                HackathonRoleType.JUDGE.value,
+            ]),
+        ).first()
+        if staff is not None:
+            is_authorized = True
+    if not is_authorized:
+        raise HTTPException(
+            status_code=403,
+            detail="Not authorized to view this submission's team",
+        )
+
+    rows = db.query(HackathonTeamMember).filter(
+        HackathonTeamMember.submission_id == sub.id,
+    ).order_by(HackathonTeamMember.invited_at).all()
+
+    # Batch user lookups so we can render usernames + emails in the UI.
+    relevant_user_ids = {
+        uid for r in rows
+        for uid in (r.invited_user_id, r.accepted_user_id)
+        if uid
+    }
+    relevant_user_ids.add(sub.submitter_user_id)
+    user_by_id: dict[str, User] = {}
+    if relevant_user_ids:
+        for u in db.query(User).filter(User.id.in_(relevant_user_ids)).all():
+            user_by_id[u.id] = u
+
+    submitter = user_by_id.get(sub.submitter_user_id)
+    return {
+        "submission_id": str(sub.id),
+        "team_name": sub.team_name,
+        "submitter": {
+            "user_id": sub.submitter_user_id,
+            "username": submitter.githubUsername if submitter else None,
+            "name": submitter.name if submitter else None,
+            "email": submitter.email if submitter else None,
+        },
+        "members": [
+            _serialize_team_member(
+                r,
+                user=user_by_id.get(r.accepted_user_id) if r.accepted_user_id else None,
+                hackathon_slug=slug,
+            )
+            for r in rows
+        ],
+    }
+
+
+@router.delete(
+    "/{slug}/submissions/{submission_id}/team/invites/{invite_id}",
+    status_code=204,
+)
+def revoke_team_invite(
+    slug: str,
+    submission_id: str,
+    invite_id: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Submitter-only. Revoke a pending invite or remove an accepted
+    teammate. The teammate loses edit access; their participant role on the
+    hackathon stays (they joined the event independently)."""
+    h, sub = _load_submission_for_team_op(db, slug, submission_id)
+    if sub.submitter_user_id != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the submitter can manage the team",
+        )
+
+    try:
+        inv_uuid = uuid.UUID(invite_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=404, detail="Team invite not found")
+    row = db.query(HackathonTeamMember).filter(
+        HackathonTeamMember.id == inv_uuid,
+        HackathonTeamMember.submission_id == sub.id,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Team invite not found")
+
+    if row.status in (TeamMemberStatus.REVOKED.value, TeamMemberStatus.DECLINED.value):
+        return None  # idempotent
+    row.status = TeamMemberStatus.REVOKED.value
+    row.revoked_at = _now()
+    db.commit()
+    return None
+
+
+# ─── Public lookup + accept/decline (team-side) ───────────────────────────────
+
+@router.get("/team-invites/lookup/{token}")
+def lookup_team_invite(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Public — used by the team-invite landing page to render context
+    BEFORE the recipient has accepted. Returns the hackathon name, the
+    submission's tagline + submitter, and the invite status. No edit
+    permissions granted by this endpoint."""
+    row = db.query(HackathonTeamMember).filter(
+        HackathonTeamMember.invite_token == token,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Team invite not found")
+
+    sub = db.query(HackathonSubmission).filter(
+        HackathonSubmission.id == row.submission_id,
+    ).first()
+    if sub is None:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    h = db.query(Hackathon).filter(Hackathon.id == sub.hackathon_id).first()
+    if h is None:
+        raise HTTPException(status_code=404, detail="Hackathon not found")
+
+    submitter = db.query(User).filter(User.id == sub.submitter_user_id).first()
+    return {
+        "hackathon": {
+            "id": str(h.id),
+            "slug": h.slug,
+            "name": h.name,
+        },
+        "submission": {
+            "id": str(sub.id),
+            "tagline": sub.tagline,
+            "team_name": sub.team_name,
+            "github_url": sub.github_url,
+        },
+        "submitter": {
+            "user_id": sub.submitter_user_id,
+            "username": submitter.githubUsername if submitter else None,
+            "name": submitter.name if submitter else None,
+        },
+        "invited_email": row.invited_email,
+        "status": row.status,
+        "expires_at": _isoformat(row.expires_at),
+        "is_active": row.is_active,
+    }
+
+
+@router.post("/team-invites/{token}/accept")
+def accept_team_invite(
+    token: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Authenticated. Accept a team invite.
+
+    Verifies the active session belongs to the invited identity:
+      - Username invite: session user.id must match invited_user_id.
+      - Email invite: session user.email (case-insensitive) must match
+        invited_email.
+
+    On accept:
+      1. Sets accepted_user_id + accepted_at + status=accepted on the team_member row.
+      2. Grants a participant role on the hackathon if not already present
+         (so the event surfaces on /me/hackathons).
+    """
+    row = db.query(HackathonTeamMember).filter(
+        HackathonTeamMember.invite_token == token,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Team invite not found")
+    if not row.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This invite is {row.status} and can no longer be accepted",
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Unknown session user")
+
+    # Identity check: ensure the right person is accepting.
+    if row.invited_user_id is not None:
+        if row.invited_user_id != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="This invite belongs to a different DevProof user",
+            )
+    elif row.invited_email is not None:
+        session_email = (user.email or "").strip().lower()
+        target_email = (row.invited_email or "").strip().lower()
+        if not session_email or session_email != target_email:
+            raise HTTPException(
+                status_code=403,
+                detail="This invite belongs to a different email address",
+            )
+
+    sub = db.query(HackathonSubmission).filter(
+        HackathonSubmission.id == row.submission_id,
+    ).first()
+    if sub is None:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    now = _now()
+    row.status = TeamMemberStatus.ACCEPTED.value
+    row.accepted_user_id = user_id
+    row.accepted_at = now
+
+    # Grant participant role if not already present (idempotent).
+    existing_role = db.query(HackathonRole).filter(
+        HackathonRole.hackathon_id == sub.hackathon_id,
+        HackathonRole.user_id == user_id,
+    ).first()
+    if existing_role is None:
+        db.add(HackathonRole(
+            hackathon_id=sub.hackathon_id,
+            user_id=user_id,
+            role=HackathonRoleType.PARTICIPANT.value,
+        ))
+
+    db.commit()
+    db.refresh(row)
+    return _serialize_team_member(row)
+
+
+@router.post("/team-invites/{token}/decline")
+def decline_team_invite(
+    token: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Authenticated. Decline a team invite. Same identity gate as accept."""
+    row = db.query(HackathonTeamMember).filter(
+        HackathonTeamMember.invite_token == token,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Team invite not found")
+    if row.status != TeamMemberStatus.PENDING.value:
+        return _serialize_team_member(row)  # idempotent for non-pending
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Unknown session user")
+    if row.invited_user_id is not None and row.invited_user_id != user_id:
+        raise HTTPException(status_code=403, detail="This invite belongs to a different user")
+    if (
+        row.invited_user_id is None
+        and row.invited_email is not None
+        and (user.email or "").strip().lower() != (row.invited_email or "").strip().lower()
+    ):
+        raise HTTPException(status_code=403, detail="This invite belongs to a different email")
+
+    row.status = TeamMemberStatus.DECLINED.value
+    row.declined_at = _now()
+    db.commit()
+    return _serialize_team_member(row)
 
 
 @router.get("/admin/mine")
@@ -2608,6 +3241,66 @@ def admin_set_sponsor_evidence(
     db.commit()
 
     return {"show_sponsor_evidence": val}
+
+
+@router.patch("/{slug}/admin/settings/submission-lock", status_code=200)
+def admin_set_submission_lock(
+    slug: str,
+    body: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(_current_user_id),
+):
+    """Organizer-only. Two-in-one: flip the manual ``submissions_locked_override``
+    toggle and/or update the scheduled ``submissions_close_at`` datetime.
+
+    Either field may be omitted to leave it unchanged. ``submissions_close_at``
+    can be set to ``null`` explicitly to clear the scheduled close.
+
+    Body:
+        {"locked_override": true | false,
+         "submissions_close_at": "2026-06-01T17:00:00Z" | null}
+    """
+    h = _get_hackathon_by_slug(db, slug)
+    _require_organizer(db, h, user_id)
+
+    if "locked_override" in body:
+        val = body["locked_override"]
+        if not isinstance(val, bool):
+            raise HTTPException(
+                status_code=422,
+                detail="locked_override must be a boolean",
+            )
+        h.submissions_locked_override = val
+
+    if "submissions_close_at" in body:
+        raw = body["submissions_close_at"]
+        if raw is None:
+            h.submissions_close_at = None
+        else:
+            if not isinstance(raw, str):
+                raise HTTPException(
+                    status_code=422,
+                    detail="submissions_close_at must be an ISO datetime string or null",
+                )
+            try:
+                # fromisoformat handles "+00:00"; common Z-suffix is normalized.
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                raise HTTPException(
+                    status_code=422,
+                    detail="submissions_close_at must be a valid ISO datetime",
+                )
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            h.submissions_close_at = parsed
+
+    db.commit()
+
+    return {
+        "locked_override": bool(h.submissions_locked_override),
+        "submissions_close_at": _isoformat(h.submissions_close_at),
+        "submissions_locked_effective": _submissions_are_locked(h),
+    }
 
 
 @router.get("/{slug}/admin/judge-scores")
