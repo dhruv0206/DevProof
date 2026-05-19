@@ -206,7 +206,7 @@ export function PlatformAdminReissueButton({ slug, name }: Props) {
                                             border: '1px solid rgba(255,255,255,0.10)',
                                             color: '#EDEDED',
                                         }}
-                                        placeholder="elsa@example.com"
+                                        placeholder="organizer@example.com"
                                     />
                                 </div>
                                 <div>

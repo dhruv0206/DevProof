@@ -139,11 +139,28 @@ function SubmissionDetailCard({
                     letterSpacing: '0.02em',
                     wordBreak: 'break-all',
                     display: 'block',
-                    marginBottom: 18,
+                    marginBottom: 10,
                 }}
             >
                 {repoShort} ↗
             </a>
+
+            <Link
+                href={`/hackathons/${slug}/admin/submission/${submission.submission_id}`}
+                style={{
+                    display: 'inline-block',
+                    fontSize: 11,
+                    color: CLAY,
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                    marginBottom: 18,
+                    textDecoration: 'none',
+                    borderBottom: `1px solid ${CLAY}`,
+                    paddingBottom: 1,
+                }}
+            >
+                View full audit →
+            </Link>
 
             {/* Score */}
             <div

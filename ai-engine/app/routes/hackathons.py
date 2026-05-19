@@ -2855,8 +2855,7 @@ def platform_reissue_invite(
     db.add(invite)
     db.commit()
 
-    frontend_base = os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000")
-    magic_link = f"{frontend_base}/hackathons/{slug}/invites/{token}"
+    magic_link = f"{_FRONTEND_BASE_URL}/hackathons/{slug}/invites/{token}"
 
     return {
         "token": token,
@@ -3192,10 +3191,9 @@ def get_judge_link(
     if h.judge_link_token is None:
         return {"judge_link_token": None, "judge_link_url": None}
 
-    frontend_base = os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000")
     return {
         "judge_link_token": h.judge_link_token,
-        "judge_link_url": f"{frontend_base}/hackathons/{slug}/judge/{h.judge_link_token}",
+        "judge_link_url": f"{_FRONTEND_BASE_URL}/hackathons/{slug}/judge/{h.judge_link_token}",
     }
 
 
@@ -3222,10 +3220,9 @@ def regenerate_judge_link(
     db.commit()
     db.refresh(h)
 
-    frontend_base = os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000")
     return {
         "judge_link_token": token,
-        "judge_link_url": f"{frontend_base}/hackathons/{slug}/judge/{token}",
+        "judge_link_url": f"{_FRONTEND_BASE_URL}/hackathons/{slug}/judge/{token}",
     }
 
 

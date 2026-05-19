@@ -509,7 +509,7 @@ function NamePrompt({
                         type="text"
                         value={value}
                         onChange={(e) => onChange(e.target.value)}
-                        placeholder="e.g. Elsa Bismuth"
+                        placeholder="e.g. Jane Doe"
                         maxLength={80}
                         autoFocus
                         style={{

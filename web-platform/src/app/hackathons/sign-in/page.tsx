@@ -161,7 +161,7 @@ export default function HackathonSignInPage() {
                                     border: '1px solid rgba(255,255,255,0.10)',
                                     color: '#EDEDED',
                                 }}
-                                placeholder="elsa@example.com"
+                                placeholder="you@example.com"
                             />
                         </div>
 

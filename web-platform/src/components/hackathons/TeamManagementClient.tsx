@@ -297,7 +297,7 @@ export function TeamManagementClient({
                                 type="email"
                                 value={email}
                                 onChange={(e) => setEmail(e.target.value)}
-                                placeholder="elsa@fomo.club"
+                                placeholder="teammate@example.com"
                                 className="w-full rounded-md border bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-1"
                                 style={{
                                     borderColor: BORDER,
