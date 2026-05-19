@@ -155,7 +155,7 @@ export function HackathonScoreCard({
                         display: 'flex',
                         alignItems: 'baseline',
                         gap: 10,
-                        marginBottom: 18,
+                        marginBottom: 6,
                     }}
                 >
                     <span
@@ -187,6 +187,20 @@ export function HackathonScoreCard({
                             {tierShort(typeof repoTier === 'string' ? repoTier : null)}
                         </span>
                     )}
+                </div>
+                {/* Hackathon-adjusted sub-label — context for the number above.
+                 * The dev portfolio (/p/<username>) uses the full V4 score
+                 * with forensics; hackathon surfaces drop forensics so
+                 * single-push submissions aren't unfairly penalized. */}
+                <div
+                    style={{
+                        fontSize: 10,
+                        color: TEXT_DIM,
+                        letterSpacing: '0.04em',
+                        marginBottom: 18,
+                    }}
+                >
+                    // hackathon-adjusted · commits not weighted
                 </div>
 
                 {/* Sponsor matches */}

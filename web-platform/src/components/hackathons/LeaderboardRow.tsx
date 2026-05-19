@@ -210,7 +210,7 @@ export function LeaderboardRow({ ranking, compact = false }: LeaderboardRowProps
                                 fontWeight: 400,
                             }}
                         >
-                            {ranking.repo_score}
+                            {ranking.hackathon_adjusted_score ?? ranking.repo_score}
                         </span>
                         <span
                             className="font-mono"
@@ -219,6 +219,20 @@ export function LeaderboardRow({ ranking, compact = false }: LeaderboardRowProps
                             /100
                         </span>
                     </span>
+                    {!compact && (
+                        <span
+                            className="font-mono"
+                            style={{
+                                display: 'block',
+                                fontSize: 9,
+                                color: TEXT_DIM,
+                                letterSpacing: '0.04em',
+                                marginTop: 4,
+                            }}
+                        >
+                            // hackathon-adjusted · commits not weighted
+                        </span>
+                    )}
                 </div>
             </div>
         </a>

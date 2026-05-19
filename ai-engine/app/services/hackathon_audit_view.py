@@ -54,6 +54,53 @@ def _v4_output_dict(audit: Any) -> dict[str, Any]:
         return {}
 
 
+def hackathon_adjusted_score(
+    v4_output: dict[str, Any],
+    settings: Optional[dict[str, Any]],
+) -> Optional[int]:
+    """Compute the hackathon-side audit score.
+
+    When the hackathon's ``skip_forensics`` setting is True (the default
+    for every hackathon — see ``HackathonSettingsIn``), the headline
+    score for judges and leaderboards excludes the FORENSICS bucket.
+    Hackathon submissions are typically a single push: no iterated
+    commit history, often a single author. Penalizing them on
+    forensics — designed to weigh production / portfolio code — is the
+    wrong rubric.
+
+    The three remaining buckets — FEATURES (50), ARCHITECTURE (19),
+    INTENT_AND_STANDARDS (31) — sum to exactly 100, so the adjusted
+    score is naturally a /100 number and lines up with how judges
+    already think about the headline.
+
+    Returns:
+        - int in [0, 100] when skip_forensics is on and the breakdown
+          contains the three required buckets.
+        - None when skip_forensics is off (caller should fall back to
+          v4_score), or when the breakdown is missing/malformed.
+    """
+    s = settings or {}
+    # Default-True matches HackathonSettingsIn; preserved here so missing
+    # settings_json still triggers the adjusted-score path.
+    if not s.get("skip_forensics", True):
+        return None
+    breakdown = (v4_output or {}).get("score_breakdown") or {}
+    if not isinstance(breakdown, dict):
+        return None
+    total: float = 0.0
+    found_any = False
+    for k in ("features", "architecture", "intent_and_standards"):
+        bucket = breakdown.get(k)
+        if isinstance(bucket, dict):
+            score = bucket.get("score")
+            if isinstance(score, (int, float)):
+                total += float(score)
+                found_any = True
+    if not found_any:
+        return None
+    return int(round(total))
+
+
 def build_admin_submission_view(
     submission: Any,
     audit: Any,
@@ -102,6 +149,10 @@ def build_admin_submission_view(
             # V4 score + tier surface in project_audits columns
             "v4_score": _get_audit_attr(audit, "v4_score"),
             "v4_tier": _get_audit_attr(audit, "v4_tier"),
+            # Hackathon-adjusted score: excludes forensics when the
+            # hackathon's skip_forensics setting is on (the default).
+            # The headline judges + leaderboards read.
+            "hackathon_adjusted_score": hackathon_adjusted_score(v4, settings),
             # The full V4Output blob — features, architecture, skills,
             # forensics, score_breakdown, etc. Same shape the dev side
             # consumes via ProjectDetailPanel.

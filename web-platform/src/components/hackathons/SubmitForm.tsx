@@ -153,9 +153,9 @@ export function SubmitForm({
             );
             return;
         }
-        if (!demoUrl.trim() && !videoUrl.trim()) {
+        if (!videoUrl.trim()) {
             setError(
-                'Provide at least one: a deployed demo URL or a video walkthrough URL. Judges need to see it working.',
+                'Video URL is required — judges need a walkthrough they can watch. A deployed demo URL is optional.',
             );
             return;
         }
@@ -255,13 +255,14 @@ export function SubmitForm({
                         className="font-mono"
                     />
                 </Field>
-                <Field label="WHAT_IT_DOES" hint={`${whatItDoes.length}/500 — context for judges`}>
+                <Field label="WHAT_IT_DOES" required hint={`${whatItDoes.length}/500 — context for judges`}>
                     <textarea
                         placeholder="A paragraph on the problem, what you built, and any clever bits"
                         value={whatItDoes}
                         onChange={(e) => setWhatItDoes(e.target.value.slice(0, 500))}
                         disabled={submitting}
                         maxLength={500}
+                        required
                         rows={4}
                         className="border-input dark:bg-input/30 placeholder:text-muted-foreground w-full rounded-md border bg-transparent px-3 py-2 font-sans text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-50"
                     />
@@ -269,18 +270,19 @@ export function SubmitForm({
             </Section>
 
             {/* ─── DEMO section ─── */}
-            <Section title="DEMO">
-                <Field label="VIDEO_URL">
+            <Section title="DEMO" required>
+                <Field label="VIDEO_URL" required hint="Walkthrough video — judges watch this">
                     <Input
                         type="url"
                         placeholder="https://youtu.be/..."
                         value={videoUrl}
                         onChange={(e) => setVideoUrl(e.target.value)}
                         disabled={submitting}
+                        required
                         className="font-mono"
                     />
                 </Field>
-                <Field label="LIVE_DEMO_URL" hint="Deployed app — judges click this">
+                <Field label="LIVE_DEMO_URL" hint="Optional — deployed app URL, if you have one">
                     <Input
                         type="url"
                         placeholder="https://your-app.vercel.app"

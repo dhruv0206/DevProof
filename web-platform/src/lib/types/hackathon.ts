@@ -71,6 +71,13 @@ export interface AdminSubmission {
     audit_status: AuditStatus;
     repo_score: number | null;
     repo_tier: RepoTierV4 | null;
+    /**
+     * Hackathon-adjusted score (forensics excluded) — the headline number
+     * the judge / admin / leaderboard surfaces should display on
+     * hackathons. Falls back to `repo_score` when the backend payload
+     * predates this field.
+     */
+    hackathon_adjusted_score?: number | null;
     matched_sponsors: Record<string, number>;
     extras: HackathonExtras;
     submitted_at: string;
@@ -110,6 +117,12 @@ export interface MySubmission {
     audit_error: string | null;
     repo_score: number | null;
     repo_tier: RepoTierV4 | null;
+    /**
+     * Hackathon-adjusted score (forensics excluded) — the headline number
+     * to show on hackathon surfaces. Falls back to `repo_score` when the
+     * backend payload predates this field.
+     */
+    hackathon_adjusted_score?: number | null;
     matched_sponsors: Record<string, number>;
     /** True iff the score number itself is visible to this caller. */
     score_visible: boolean;
@@ -176,6 +189,12 @@ export interface LeaderboardRanking {
     team_members: string[];
     github_url: string;
     repo_score: number;
+    /**
+     * Hackathon-adjusted score (forensics excluded). The leaderboard
+     * is ranked by this; the row component should display it as the
+     * headline number with the "// hackathon-adjusted" sub-label.
+     */
+    hackathon_adjusted_score?: number | null;
     repo_tier: RepoTierV4 | null;
     matched_sponsors: Record<string, number>;
 }

@@ -162,46 +162,68 @@ function SubmissionDetailCard({
                 View full audit →
             </Link>
 
-            {/* Score */}
-            <div
-                style={{
-                    display: 'flex',
-                    alignItems: 'baseline',
-                    gap: 6,
-                    marginBottom: 18,
-                }}
-            >
-                <span
+            {/* Score (hackathon-adjusted — forensics excluded). Falls back
+             * to repo_score when the backend payload predates the field. */}
+            <div style={{ marginBottom: 18 }}>
+                <div
+                    style={{
+                        display: 'flex',
+                        alignItems: 'baseline',
+                        gap: 6,
+                    }}
+                >
+                    <span
+                        style={{
+                            fontSize: 10,
+                            color: TEXT_DIM,
+                            letterSpacing: '0.12em',
+                            textTransform: 'uppercase',
+                        }}
+                    >
+                        score
+                    </span>
+                    {(() => {
+                        const headline =
+                            typeof submission.hackathon_adjusted_score === 'number'
+                                ? submission.hackathon_adjusted_score
+                                : submission.repo_score;
+                        if (headline === null || headline === undefined) {
+                            return (
+                                <span style={{ fontSize: 44, color: TEXT_DIM, lineHeight: 1 }}>
+                                    —
+                                </span>
+                            );
+                        }
+                        return (
+                            <>
+                                <span
+                                    style={{
+                                        fontSize: 44,
+                                        color: CLAY,
+                                        fontVariantNumeric: 'tabular-nums',
+                                        letterSpacing: '-0.04em',
+                                        lineHeight: 1,
+                                        fontWeight: 400,
+                                    }}
+                                >
+                                    {headline}
+                                </span>
+                                <span style={{ fontSize: 12, color: TEXT_DIM }}>/100</span>
+                            </>
+                        );
+                    })()}
+                </div>
+                <div
                     style={{
                         fontSize: 10,
                         color: TEXT_DIM,
-                        letterSpacing: '0.12em',
-                        textTransform: 'uppercase',
+                        letterSpacing: '0.04em',
+                        fontFamily: 'ui-monospace, monospace',
+                        marginTop: 4,
                     }}
                 >
-                    score
-                </span>
-                {submission.repo_score !== null ? (
-                    <>
-                        <span
-                            style={{
-                                fontSize: 44,
-                                color: CLAY,
-                                fontVariantNumeric: 'tabular-nums',
-                                letterSpacing: '-0.04em',
-                                lineHeight: 1,
-                                fontWeight: 400,
-                            }}
-                        >
-                            {submission.repo_score}
-                        </span>
-                        <span style={{ fontSize: 12, color: TEXT_DIM }}>/100</span>
-                    </>
-                ) : (
-                    <span style={{ fontSize: 44, color: TEXT_DIM, lineHeight: 1 }}>
-                        —
-                    </span>
-                )}
+                    // hackathon-adjusted · commits not weighted
+                </div>
             </div>
 
             {/* Sponsors */}

@@ -437,10 +437,19 @@ def _serialize_submission(
 
     repo_score = None
     repo_tier = None
+    hackathon_score: Optional[int] = None
     deep_seconds = None
     if audit is not None and audit.v4_output is not None:
         repo_score = audit.v4_score
         repo_tier = audit.v4_tier
+        # Hackathon-adjusted score (forensics excluded by default). Lives
+        # next to repo_score so judge UIs / leaderboards can pick the
+        # right headline without re-deriving it.
+        from app.services.hackathon_audit_view import hackathon_adjusted_score as _hadj
+        hackathon_score = _hadj(
+            audit.v4_output or {},
+            (hackathon.settings_json or {}) if hackathon is not None else None,
+        )
         try:
             latencies = (
                 (audit.v4_output or {})
@@ -470,6 +479,11 @@ def _serialize_submission(
         "audit_error": sub.audit_error,
         "repo_score": repo_score if score_visible else None,
         "repo_tier": repo_tier if score_visible else None,
+        # Hackathon-adjusted score — the headline number judges + leaderboards
+        # should use on hackathon surfaces. Excludes forensics when
+        # hackathon.settings.skip_forensics is True (the default). Falls back
+        # to repo_score when skip_forensics is off.
+        "hackathon_adjusted_score": hackathon_score if score_visible else None,
         "matched_sponsors": sponsor_counts if score_visible else {},
         "score_visible": bool(score_visible and repo_score is not None),
         "score_hidden_reason": (
@@ -1247,7 +1261,8 @@ def create_submission(
     # context that a non-DevProof judge can evaluate the project:
     #   - tagline (already required by the form)
     #   - what_it_does paragraph
-    #   - at least one of demo_url (deployed) OR extras.demo_video_url
+    #   - video walkthrough URL (a deployed demo URL is nice-to-have but
+    #     not everyone can deploy — a walkthrough is the universal floor)
     # Tagline is enforced by the form's `required` attribute + the Pydantic
     # max_length; the backend check below is the API-level backstop.
     _what = (body.what_it_does or "").strip()
@@ -1259,17 +1274,16 @@ def create_submission(
                 "the problem and what you built so judges have context."
             ),
         )
-    _demo = (body.demo_url or "").strip()
     _video = ""
     if isinstance(body.extras, dict):
         _video = str(body.extras.get("demo_video_url") or "").strip()
-    if not _demo and not _video:
+    if not _video:
         raise HTTPException(
             status_code=422,
             detail=(
-                "Provide at least one of: deployed demo URL or demo video "
-                "URL. Judges need to see the project working, not just "
-                "read the code."
+                "Video URL is required — judges need a walkthrough they "
+                "can watch. A deployed demo URL is optional (not everyone "
+                "can deploy)."
             ),
         )
 
@@ -1731,6 +1745,9 @@ def get_leaderboard(
         for u in db.query(User).filter(User.id.in_(submitter_ids)).all():
             users_by_id[u.id] = u
 
+    from app.services.hackathon_audit_view import hackathon_adjusted_score as _hadj
+    settings = h.settings_json or {}
+
     items: list[dict[str, Any]] = []
     for r in rows:
         audit = audits_by_project.get(r.project_id) if r.project_id else None
@@ -1743,6 +1760,11 @@ def get_leaderboard(
             for t in (r.tracks_opted_out_json or [])
             if isinstance(t, str) and t.strip()
         }
+        # Hackathon-adjusted headline (forensics excluded when
+        # skip_forensics is on, the default). The leaderboard ranks by
+        # the adjusted score, which is what judges see — keeping the
+        # rankings consistent with the score displayed on each card.
+        adjusted = _hadj(audit.v4_output or {}, settings)
         items.append({
             "submission_id": str(r.id),
             "submitter_username": (
@@ -1753,13 +1775,19 @@ def get_leaderboard(
             "github_url": r.github_url,
             "tagline": r.tagline,
             "repo_score": audit.v4_score,
+            "hackathon_adjusted_score": adjusted,
             "repo_tier": audit.v4_tier,
             "matched_sponsors": {k: len(v) for k, v in matched.items()},
             # Internal use only — stripped from the public payload below.
             "_tracks_opted_out": opted_out,
         })
 
-    items.sort(key=lambda x: x["repo_score"] or 0, reverse=True)
+    # Rank by adjusted score; fall back to raw v4 score when adjusted is
+    # None (e.g., the rare hackathon with skip_forensics turned off).
+    items.sort(
+        key=lambda x: (x["hackathon_adjusted_score"] if x["hackathon_adjusted_score"] is not None else x["repo_score"]) or 0,
+        reverse=True,
+    )
     rankings = [
         {"rank": i + 1, **{k: v for k, v in it.items() if not k.startswith("_")}}
         for i, it in enumerate(items)
@@ -1782,6 +1810,7 @@ def get_leaderboard(
                 "github_url": it["github_url"],
                 "tagline": it["tagline"],
                 "repo_score": it["repo_score"],
+                "hackathon_adjusted_score": it["hackathon_adjusted_score"],
                 "repo_tier": it["repo_tier"],
                 "claim_count": it["matched_sponsors"].get(sname, 0),
             }
@@ -1789,8 +1818,13 @@ def get_leaderboard(
             if sname in (it.get("matched_sponsors") or {})
             and sname_low not in it["_tracks_opted_out"]
         ]
+        # Sort tiebreaker by adjusted score so sponsor sub-boards match the
+        # main leaderboard's hackathon-adjusted ordering.
         sponsor_items.sort(
-            key=lambda x: (x["claim_count"], x["repo_score"] or 0),
+            key=lambda x: (
+                x["claim_count"],
+                (x["hackathon_adjusted_score"] if x["hackathon_adjusted_score"] is not None else x["repo_score"]) or 0,
+            ),
             reverse=True,
         )
         if sponsor_items:
@@ -3288,11 +3322,13 @@ def judge_context(
         if submitter_ids else {}
     )
 
+    from app.services.hackathon_audit_view import hackathon_adjusted_score as _hadj
     sub_payload: list[dict[str, Any]] = []
     for s in submissions:
         audit = None
         score = None
         tier = None
+        adjusted_score: Optional[int] = None
         if s.project_id is not None:
             pa = db.query(ProjectAudit).filter(
                 ProjectAudit.project_id == s.project_id,
@@ -3301,6 +3337,10 @@ def judge_context(
                 audit = pa
                 score = pa.v4_score if hasattr(pa, "v4_score") else None
                 tier = pa.v4_tier if hasattr(pa, "v4_tier") else None
+                adjusted_score = _hadj(
+                    pa.v4_output or {},
+                    h.settings_json or {},
+                )
 
         submitter = submitters_by_id.get(s.submitter_user_id)
 
@@ -3319,6 +3359,9 @@ def judge_context(
             "audit_error": s.audit_error,
             "repo_score": score,
             "repo_tier": tier,
+            # Headline score for the hackathon judge surface. Excludes
+            # forensics when settings.skip_forensics is True (the default).
+            "hackathon_adjusted_score": adjusted_score,
             "submitted_at": _isoformat(s.submitted_at),
             # New first-class fields so the collapsed judge card can show
             # what the project IS (one-liner) without needing a separate

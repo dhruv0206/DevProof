@@ -44,6 +44,12 @@ interface SubmissionFullPayload {
     audit: {
         v4_score: number | null;
         v4_tier: string | null;
+        /**
+         * Hackathon-adjusted score (forensics excluded when the hackathon's
+         * skip_forensics setting is true — the default). Headline number
+         * for hackathon surfaces; the dev portfolio still uses v4_score.
+         */
+        hackathon_adjusted_score?: number | null;
         v4_output: V4OutputBlob | Record<string, never>;
         complexity_tier: string | null;
     };
@@ -137,7 +143,12 @@ export default async function SubmissionDetailPage({
 
     const { submission, audit, sponsor_evidence, show_sponsor_evidence } = data;
     const v4 = audit.v4_output as V4OutputBlob;
-    const score = audit.v4_score ?? v4?.repo_score ?? 0;
+    // Hackathon-adjusted score is the headline on this surface. Falls back
+    // to v4_score for older audits where the backend didn't compute it.
+    const score =
+        typeof audit.hackathon_adjusted_score === 'number'
+            ? audit.hackathon_adjusted_score
+            : audit.v4_score ?? v4?.repo_score ?? 0;
     const tier = (audit.v4_tier || v4?.repo_tier || 'BASIC').toUpperCase();
     const tierStyle = tierConfig[tier] || tierConfig.BASIC;
     const breakdown = v4?.score_breakdown;
@@ -180,6 +191,12 @@ export default async function SubmissionDetailPage({
                                 /100
                             </span>
                         </span>
+                    </div>
+                    <div
+                        className="mt-1 font-mono text-[10px]"
+                        style={{ color: TEXT_DIM, letterSpacing: '0.04em' }}
+                    >
+                        // hackathon-adjusted · commits not weighted
                     </div>
                     <a
                         href={submission.github_url}

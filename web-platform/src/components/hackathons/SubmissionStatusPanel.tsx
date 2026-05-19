@@ -530,7 +530,7 @@ export function SubmissionStatusPanel({
             ) : detail.repo_score !== null ? (
                 <>
                     <HackathonScoreCard
-                        repoScore={detail.repo_score}
+                        repoScore={detail.hackathon_adjusted_score ?? detail.repo_score ?? 0}
                         repoTier={detail.repo_tier}
                         matchedSponsors={detail.matched_sponsors}
                         deepAnalysisSeconds={detail.deep_analysis_seconds}

@@ -36,6 +36,9 @@ interface Submission {
     audit_error: string | null;
     repo_score: number | null;
     repo_tier: string | null;
+    // Hackathon headline score: V4 minus forensics, /100. Falls back to
+    // repo_score when the backend hasn't been redeployed.
+    hackathon_adjusted_score?: number | null;
     submitted_at: string | null;
     // New first-class fields, populated when the backend has been updated.
     // Optional so older payloads still typecheck.
@@ -684,12 +687,13 @@ function SubmissionCard({
                     // quality fields. New submissions are gated server-side
                     // and will never trigger this; the chip is here so
                     // judges can deprioritize old incomplete entries.
-                    const hasDemoOrVideo =
-                        (submission.demo_url && submission.demo_url.trim()) ||
-                        (typeof submission.extras?.demo_video_url === 'string' &&
-                            (submission.extras.demo_video_url as string).trim());
+                    // Required floor: what_it_does + video URL (demo URL is
+                    // optional — not everyone can deploy).
+                    const hasVideo =
+                        typeof submission.extras?.demo_video_url === 'string' &&
+                        (submission.extras.demo_video_url as string).trim();
                     const incomplete =
-                        !submission.what_it_does || !hasDemoOrVideo;
+                        !submission.what_it_does || !hasVideo;
                     if (!incomplete) return null;
                     return (
                         <>
@@ -791,27 +795,50 @@ function SubmissionCard({
                 </div>
             )}
 
-            {/* V4 audit score */}
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 14 }}>
-                <span
-                    style={{
-                        fontSize: 10,
-                        color: TEXT_DIM,
-                        letterSpacing: '0.12em',
-                        textTransform: 'uppercase',
-                    }}
-                >
-                    audit_score
-                </span>
-                <span style={{ fontSize: 22, color: CLAY, fontWeight: 500 }}>
-                    {submission.repo_score !== null
-                        ? submission.repo_score
-                        : '—'}
-                </span>
-                {submission.repo_score !== null && (
-                    <span style={{ fontSize: 12, color: TEXT_DIM }}>/100</span>
-                )}
-            </div>
+            {/* Hackathon-adjusted audit score. Headline is the 3-bucket
+             * /100 score that excludes forensics — hackathon submissions
+             * are typically a single push, so penalizing them on commit
+             * history is the wrong rubric. Falls back to repo_score when
+             * the backend payload doesn't carry the adjusted field yet. */}
+            {(() => {
+                const headline =
+                    typeof submission.hackathon_adjusted_score === 'number'
+                        ? submission.hackathon_adjusted_score
+                        : submission.repo_score;
+                return (
+                    <div style={{ marginBottom: 14 }}>
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                            <span
+                                style={{
+                                    fontSize: 10,
+                                    color: TEXT_DIM,
+                                    letterSpacing: '0.12em',
+                                    textTransform: 'uppercase',
+                                }}
+                            >
+                                audit_score
+                            </span>
+                            <span style={{ fontSize: 22, color: CLAY, fontWeight: 500 }}>
+                                {headline !== null && headline !== undefined ? headline : '—'}
+                            </span>
+                            {headline !== null && headline !== undefined && (
+                                <span style={{ fontSize: 12, color: TEXT_DIM }}>/100</span>
+                            )}
+                        </div>
+                        <div
+                            style={{
+                                fontSize: 10,
+                                color: TEXT_DIM,
+                                letterSpacing: '0.04em',
+                                fontFamily: 'ui-monospace, monospace',
+                                marginTop: 4,
+                            }}
+                        >
+                            // hackathon-adjusted · commits not weighted
+                        </div>
+                    </div>
+                );
+            })()}
 
             {/* View details — lazy-loaded audit detail (claims, architecture,
              * skills, score breakdown). Hidden behind a toggle because most
@@ -1189,28 +1216,54 @@ function DetailsPanel({
                 </DetailSection>
             )}
 
+            {/* PROJECT OVERVIEW — always present, even when other sections
+             * are sparse. Surfaces what V4 actually looked at so judges
+             * understand the score in context. */}
+            <ProjectOverviewSection
+                v4={v4}
+                claimCount={claims.length}
+                architectureCount={architecture.length}
+                skillsCount={skills.length}
+            />
+
             {/* SCORE BREAKDOWN */}
             {breakdown && Object.keys(breakdown).length > 0 && (
                 <DetailSection label="SCORE_BREAKDOWN">
                     <div
                         style={{
+                            fontSize: 10,
+                            color: TEXT_DIM,
+                            letterSpacing: '0.04em',
+                            fontFamily: 'ui-monospace, monospace',
+                            marginBottom: 8,
+                        }}
+                    >
+                        // hackathon-adjusted · commits not weighted
+                    </div>
+                    <div
+                        style={{
                             display: 'grid',
-                            gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
                             gap: 8,
                             fontSize: 12,
                         }}
                     >
                         {Object.entries(breakdown).map(([k, v]) => {
+                            const isForensics = k === 'forensics';
                             const pct = v.max && v.max > 0
                                 ? (v.score / v.max) * 100
                                 : null;
+                            const description = BUCKET_DESCRIPTIONS[k] || null;
                             return (
                                 <div
                                     key={k}
                                     style={{
-                                        padding: '6px 8px',
+                                        padding: '8px 10px',
                                         border: `1px solid ${BORDER}`,
-                                        background: 'rgba(255,255,255,0.02)',
+                                        background: isForensics
+                                            ? 'rgba(255,255,255,0.01)'
+                                            : 'rgba(255,255,255,0.02)',
+                                        opacity: isForensics ? 0.55 : 1,
                                     }}
                                 >
                                     <div
@@ -1226,7 +1279,11 @@ function DetailsPanel({
                                     <div
                                         style={{
                                             fontSize: 14,
-                                            color: pct !== null && pct >= 70 ? CLAY : '#EDEDED',
+                                            color: isForensics
+                                                ? TEXT_DIM
+                                                : pct !== null && pct >= 70
+                                                    ? CLAY
+                                                    : '#EDEDED',
                                             fontVariantNumeric: 'tabular-nums',
                                         }}
                                     >
@@ -1237,6 +1294,33 @@ function DetailsPanel({
                                             </span>
                                         )}
                                     </div>
+                                    {description && (
+                                        <div
+                                            style={{
+                                                fontSize: 10,
+                                                color: TEXT_DIM,
+                                                lineHeight: 1.4,
+                                                marginTop: 4,
+                                                fontFamily:
+                                                    'ui-sans-serif, system-ui, -apple-system, sans-serif',
+                                            }}
+                                        >
+                                            {description}
+                                        </div>
+                                    )}
+                                    {isForensics && (
+                                        <div
+                                            style={{
+                                                fontSize: 9,
+                                                color: TEXT_DIM,
+                                                marginTop: 4,
+                                                fontFamily: 'ui-monospace, monospace',
+                                                letterSpacing: '0.04em',
+                                            }}
+                                        >
+                                            // not weighted
+                                        </div>
+                                    )}
                                 </div>
                             );
                         })}
@@ -1244,79 +1328,97 @@ function DetailsPanel({
                 </DetailSection>
             )}
 
-            {/* VERIFIED CLAIMS */}
-            {claims.length > 0 && (
-                <DetailSection label={`VERIFIED_CLAIMS · ${claims.length}`}>
-                    <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                        {claims.slice(0, 12).map((c, i) => {
-                            const summary =
-                                (c.summary as string | undefined) ??
-                                (c.title as string | undefined) ??
-                                '(no summary)';
-                            const tier = c.tier as string | undefined;
-                            const files = (c.evidence_files as string[] | undefined) ?? [];
-                            const lines = (c.evidence_lines as number[] | undefined) ?? [];
-                            return (
-                                <li
-                                    key={i}
-                                    style={{
-                                        padding: '6px 0',
-                                        borderBottom: '1px solid rgba(255,255,255,0.04)',
-                                    }}
-                                >
-                                    <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-                                        {tier && (
-                                            <span
+            {/* VERIFIED CLAIMS — always shown so judges know what the algo
+             * looked for, with empty-state copy when V4 found none. */}
+            <DetailSection
+                label={`VERIFIED_CLAIMS · ${claims.length}`}
+            >
+                {claims.length === 0 ? (
+                    <EmptyStateNote>
+                        V4 generates verifiable claims for cross-file logic,
+                        services, and complex flows. Tutorial / boilerplate /
+                        scaffold repos legitimately produce 0 here.
+                    </EmptyStateNote>
+                ) : (
+                    <>
+                        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                            {claims.slice(0, 12).map((c, i) => {
+                                const summary =
+                                    (c.summary as string | undefined) ??
+                                    (c.title as string | undefined) ??
+                                    '(no summary)';
+                                const tier = c.tier as string | undefined;
+                                const files = (c.evidence_files as string[] | undefined) ?? [];
+                                const lines = (c.evidence_lines as number[] | undefined) ?? [];
+                                return (
+                                    <li
+                                        key={i}
+                                        style={{
+                                            padding: '6px 0',
+                                            borderBottom: '1px solid rgba(255,255,255,0.04)',
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                                            {tier && (
+                                                <span
+                                                    style={{
+                                                        fontSize: 9,
+                                                        color: CLAY,
+                                                        letterSpacing: '0.06em',
+                                                    }}
+                                                >
+                                                    {tier.replace('TIER_', 'T')}
+                                                </span>
+                                            )}
+                                            <span style={{ fontSize: 12, color: '#EDEDED' }}>
+                                                {summary}
+                                            </span>
+                                        </div>
+                                        {files.length > 0 && (
+                                            <div
                                                 style={{
-                                                    fontSize: 9,
-                                                    color: CLAY,
-                                                    letterSpacing: '0.06em',
+                                                    fontSize: 10,
+                                                    color: TEXT_DIM,
+                                                    fontFamily: 'ui-monospace, monospace',
+                                                    marginTop: 2,
+                                                    wordBreak: 'break-all',
                                                 }}
                                             >
-                                                {tier.replace('TIER_', 'T')}
-                                            </span>
+                                                {files.slice(0, 3).map((f, idx) => (
+                                                    <span key={idx}>
+                                                        {f}
+                                                        {lines[idx] !== undefined ? `:${lines[idx]}` : ''}
+                                                        {idx < Math.min(files.length, 3) - 1 ? ' · ' : ''}
+                                                    </span>
+                                                ))}
+                                                {files.length > 3 && (
+                                                    <span> +{files.length - 3} more</span>
+                                                )}
+                                            </div>
                                         )}
-                                        <span style={{ fontSize: 12, color: '#EDEDED' }}>
-                                            {summary}
-                                        </span>
-                                    </div>
-                                    {files.length > 0 && (
-                                        <div
-                                            style={{
-                                                fontSize: 10,
-                                                color: TEXT_DIM,
-                                                fontFamily: 'ui-monospace, monospace',
-                                                marginTop: 2,
-                                                wordBreak: 'break-all',
-                                            }}
-                                        >
-                                            {files.slice(0, 3).map((f, idx) => (
-                                                <span key={idx}>
-                                                    {f}
-                                                    {lines[idx] !== undefined ? `:${lines[idx]}` : ''}
-                                                    {idx < Math.min(files.length, 3) - 1 ? ' · ' : ''}
-                                                </span>
-                                            ))}
-                                            {files.length > 3 && (
-                                                <span> +{files.length - 3} more</span>
-                                            )}
-                                        </div>
-                                    )}
-                                </li>
-                            );
-                        })}
-                    </ul>
-                    {claims.length > 12 && (
-                        <div style={{ fontSize: 11, color: TEXT_DIM, marginTop: 6 }}>
-                            // {claims.length - 12} more claims not shown
-                        </div>
-                    )}
-                </DetailSection>
-            )}
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                        {claims.length > 12 && (
+                            <div style={{ fontSize: 11, color: TEXT_DIM, marginTop: 6 }}>
+                                // {claims.length - 12} more claims not shown
+                            </div>
+                        )}
+                    </>
+                )}
+            </DetailSection>
 
-            {/* ARCHITECTURE */}
-            {architecture.length > 0 && (
-                <DetailSection label="ARCHITECTURE">
+            {/* ARCHITECTURE — always shown with empty-state copy when sparse. */}
+            <DetailSection label={`ARCHITECTURE · ${architecture.length}`}>
+                {architecture.length === 0 ? (
+                    <EmptyStateNote>
+                        V4 detects cross-file architectural patterns (service
+                        layers, streaming pipelines, agent loops, etc.).
+                        Single-file or thin-wrapper projects often score 0
+                        here even with working features.
+                    </EmptyStateNote>
+                ) : (
                     <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: 12 }}>
                         {architecture.slice(0, 8).map((p, i) => (
                             <li
@@ -1333,12 +1435,18 @@ function DetailsPanel({
                             </li>
                         ))}
                     </ul>
-                </DetailSection>
-            )}
+                )}
+            </DetailSection>
 
-            {/* SKILLS */}
-            {skills.length > 0 && (
-                <DetailSection label="SKILLS">
+            {/* SKILLS — always shown with empty-state copy when sparse. */}
+            <DetailSection label={`SKILLS · ${skills.length}`}>
+                {skills.length === 0 ? (
+                    <EmptyStateNote>
+                        Skills are derived from verified claims + architecture
+                        patterns. With 0 claims and 0 patterns above, the
+                        skills list is correctly empty.
+                    </EmptyStateNote>
+                ) : (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                         {skills.slice(0, 30).map((sk, i) => {
                             const name =
@@ -1361,8 +1469,8 @@ function DetailsPanel({
                             );
                         })}
                     </div>
-                </DetailSection>
-            )}
+                )}
+            </DetailSection>
 
             {/* SPONSOR EVIDENCE (gated on organizer toggle) */}
             {details.show_sponsor_evidence &&
@@ -1424,5 +1532,91 @@ function DetailSection({
             </div>
             {children}
         </div>
+    );
+}
+
+/** One-line "what this bucket measures" copy. Shown under each
+ *  SCORE_BREAKDOWN tile so judges know what the number means. Stays
+ *  in sync with the V4 rubric — keys must match score_breakdown keys. */
+const BUCKET_DESCRIPTIONS: Record<string, string> = {
+    features: 'Tiered claims weighted by complexity',
+    forensics: 'Commit history + provenance signals',
+    architecture: 'Cross-file patterns detected',
+    intent_and_standards: 'Naming, docs, conventions',
+};
+
+/** Render a small italic note for sections that V4 didn't produce
+ *  output for. Replaces the previous behavior of hiding empty
+ *  sections, which made the audit look broken. */
+function EmptyStateNote({ children }: { children: React.ReactNode }) {
+    return (
+        <div
+            style={{
+                fontSize: 11,
+                color: TEXT_DIM,
+                lineHeight: 1.5,
+                fontFamily: 'ui-monospace, monospace',
+                padding: '8px 10px',
+                border: `1px dashed ${BORDER}`,
+                background: 'rgba(255,255,255,0.01)',
+            }}
+        >
+            // {children}
+        </div>
+    );
+}
+
+/** Project Overview — always-on block at the top of the audit detail
+ *  panel. Surfaces what V4 actually looked at (tech stack, complexity
+ *  tier, signal counts) so judges have context even when individual
+ *  sections like CLAIMS or ARCHITECTURE are empty. */
+function ProjectOverviewSection({
+    v4,
+    claimCount,
+    architectureCount,
+    skillsCount,
+}: {
+    v4: Record<string, unknown>;
+    claimCount: number;
+    architectureCount: number;
+    skillsCount: number;
+}) {
+    const stackRaw = v4.stack;
+    const stack: string[] = Array.isArray(stackRaw)
+        ? stackRaw
+              .map((s) => (typeof s === 'string' ? s : ''))
+              .filter(Boolean)
+        : [];
+    const tier =
+        typeof v4.repo_tier === 'string'
+            ? v4.repo_tier.replace('TIER_', 'T').replace('_DEEP', '·DEEP').replace('_LOGIC', '·LOGIC').replace('_UI', '·UI')
+            : null;
+    return (
+        <DetailSection label="PROJECT_OVERVIEW">
+            <div
+                style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'auto 1fr',
+                    columnGap: 14,
+                    rowGap: 4,
+                    fontSize: 12,
+                    fontFamily: 'ui-monospace, monospace',
+                }}
+            >
+                <span style={{ color: TEXT_DIM, letterSpacing: '0.04em' }}>STACK</span>
+                <span style={{ color: '#EDEDED' }}>
+                    {stack.length > 0 ? stack.join(' · ') : '—'}
+                </span>
+                <span style={{ color: TEXT_DIM, letterSpacing: '0.04em' }}>COMPLEXITY</span>
+                <span style={{ color: '#EDEDED' }}>
+                    {tier ?? '—'}
+                </span>
+                <span style={{ color: TEXT_DIM, letterSpacing: '0.04em' }}>SIGNALS</span>
+                <span style={{ color: '#A1A1A1' }}>
+                    {claimCount} claims · {architectureCount} patterns ·{' '}
+                    {skillsCount} skills
+                </span>
+            </div>
+        </DetailSection>
     );
 }
