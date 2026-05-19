@@ -275,7 +275,7 @@ export function PlatformAdminCreateButton() {
                                         value={email}
                                         onChange={(e) => setEmail(e.target.value)}
                                         disabled={submitting}
-                                        placeholder="elsa@fomo.club"
+                                        placeholder="organizer@example.com"
                                         className="w-full rounded-md px-3 py-2 text-sm bg-transparent outline-none"
                                         style={{
                                             border: '1px solid rgba(255,255,255,0.10)',
@@ -292,7 +292,7 @@ export function PlatformAdminCreateButton() {
                                         value={name}
                                         onChange={(e) => setName(e.target.value)}
                                         disabled={submitting}
-                                        placeholder="Elsa Bismuth"
+                                        placeholder="Jane Doe"
                                         className="w-full rounded-md px-3 py-2 text-sm bg-transparent outline-none"
                                         style={{
                                             border: '1px solid rgba(255,255,255,0.10)',
