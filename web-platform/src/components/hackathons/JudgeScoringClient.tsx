@@ -24,6 +24,10 @@ const BORDER = 'rgba(255,255,255,0.08)';
 interface Submission {
     submission_id: string;
     submitter_user_id: string;
+    // Resolved github username for display. Falls back to user_id if the
+    // backend hasn't been updated to include it yet.
+    submitter_username?: string | null;
+    submitter_name?: string | null;
     github_url: string;
     team_members: string[];
     extras: Record<string, unknown>;
@@ -657,7 +661,7 @@ function SubmissionCard({
                         fontWeight: 500,
                     }}
                 >
-                    @{submission.submitter_user_id}
+                    @{submission.submitter_username ?? submission.submitter_user_id}
                 </span>
                 {submission.team_members.length > 1 && (
                     <span
@@ -675,6 +679,36 @@ function SubmissionCard({
                 <span style={{ fontSize: 11, color: TEXT_DIM }}>
                     {tierLabel(submission.repo_tier)}
                 </span>
+                {(() => {
+                    // Flag legacy submissions that lack the post-2026-05-19
+                    // quality fields. New submissions are gated server-side
+                    // and will never trigger this; the chip is here so
+                    // judges can deprioritize old incomplete entries.
+                    const hasDemoOrVideo =
+                        (submission.demo_url && submission.demo_url.trim()) ||
+                        (typeof submission.extras?.demo_video_url === 'string' &&
+                            (submission.extras.demo_video_url as string).trim());
+                    const incomplete =
+                        !submission.what_it_does || !hasDemoOrVideo;
+                    if (!incomplete) return null;
+                    return (
+                        <>
+                            <span style={{ opacity: 0.5, fontSize: 11 }}>·</span>
+                            <span
+                                style={{
+                                    fontSize: 10,
+                                    color: '#F59E0B',
+                                    letterSpacing: '0.08em',
+                                    border: '1px solid rgba(245,158,11,0.3)',
+                                    padding: '1px 6px',
+                                    background: 'rgba(245,158,11,0.06)',
+                                }}
+                            >
+                                // INCOMPLETE
+                            </span>
+                        </>
+                    );
+                })()}
             </div>
 
             {/* Tagline + team name (new first-class fields, 2026-05-17). Always
@@ -1106,8 +1140,26 @@ function DetailsPanel({
         [];
     const skills =
         (v4.skills as Array<string | { name?: string }> | undefined) ?? [];
-    const breakdown =
-        (v4.score_breakdown as Record<string, number> | undefined) ?? null;
+    // V4 emits score_breakdown as { bucket: { score: number, max: number } }
+    // rather than a flat { bucket: number }. Normalize so the renderer below
+    // can display "score/max" in both shapes (and gracefully degrade if a
+    // future variant changes the keys again).
+    const rawBreakdown =
+        (v4.score_breakdown as Record<string, unknown> | undefined) ?? null;
+    const breakdown: Record<string, { score: number; max: number | null }> | null =
+        rawBreakdown
+            ? Object.fromEntries(
+                  Object.entries(rawBreakdown).map(([k, v]) => {
+                      if (typeof v === 'number') {
+                          return [k, { score: v, max: null }];
+                      }
+                      const obj = (v ?? {}) as Record<string, unknown>;
+                      const score = typeof obj.score === 'number' ? obj.score : 0;
+                      const max = typeof obj.max === 'number' ? obj.max : null;
+                      return [k, { score, max }];
+                  }),
+              )
+            : null;
 
     return (
         <div
@@ -1148,38 +1200,46 @@ function DetailsPanel({
                             fontSize: 12,
                         }}
                     >
-                        {Object.entries(breakdown).map(([k, v]) => (
-                            <div
-                                key={k}
-                                style={{
-                                    padding: '6px 8px',
-                                    border: `1px solid ${BORDER}`,
-                                    background: 'rgba(255,255,255,0.02)',
-                                }}
-                            >
+                        {Object.entries(breakdown).map(([k, v]) => {
+                            const pct = v.max && v.max > 0
+                                ? (v.score / v.max) * 100
+                                : null;
+                            return (
                                 <div
+                                    key={k}
                                     style={{
-                                        fontSize: 9,
-                                        color: TEXT_DIM,
-                                        letterSpacing: '0.06em',
-                                        textTransform: 'uppercase',
+                                        padding: '6px 8px',
+                                        border: `1px solid ${BORDER}`,
+                                        background: 'rgba(255,255,255,0.02)',
                                     }}
                                 >
-                                    {k.replace(/_/g, ' ')}
+                                    <div
+                                        style={{
+                                            fontSize: 9,
+                                            color: TEXT_DIM,
+                                            letterSpacing: '0.06em',
+                                            textTransform: 'uppercase',
+                                        }}
+                                    >
+                                        {k.replace(/_/g, ' ')}
+                                    </div>
+                                    <div
+                                        style={{
+                                            fontSize: 14,
+                                            color: pct !== null && pct >= 70 ? CLAY : '#EDEDED',
+                                            fontVariantNumeric: 'tabular-nums',
+                                        }}
+                                    >
+                                        {v.score.toFixed(0)}
+                                        {v.max !== null && (
+                                            <span style={{ color: TEXT_DIM, fontSize: 11 }}>
+                                                {' '}/ {v.max}
+                                            </span>
+                                        )}
+                                    </div>
                                 </div>
-                                <div
-                                    style={{
-                                        fontSize: 14,
-                                        color: typeof v === 'number' && v >= 70
-                                            ? CLAY
-                                            : '#EDEDED',
-                                        fontVariantNumeric: 'tabular-nums',
-                                    }}
-                                >
-                                    {typeof v === 'number' ? v.toFixed(0) : '—'}
-                                </div>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </DetailSection>
             )}

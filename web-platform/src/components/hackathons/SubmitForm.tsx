@@ -147,6 +147,18 @@ export function SubmitForm({
             setError('Tagline is required — one line that explains what you built.');
             return;
         }
+        if (!whatItDoes.trim()) {
+            setError(
+                'What it does is required — add a paragraph so judges have context.',
+            );
+            return;
+        }
+        if (!demoUrl.trim() && !videoUrl.trim()) {
+            setError(
+                'Provide at least one: a deployed demo URL or a video walkthrough URL. Judges need to see it working.',
+            );
+            return;
+        }
         for (const key of extrasRequired) {
             if (!extras[key]?.trim()) {
                 setError(`${fieldConfig(key).label} is required.`);

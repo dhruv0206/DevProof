@@ -1242,6 +1242,37 @@ def create_submission(
         h, code=422, detail="Submissions are closed for this event",
     )
 
+    # Quality gate — submissions go straight to SUBMITTED here (no draft
+    # state), so judges receive whatever is created. Require enough
+    # context that a non-DevProof judge can evaluate the project:
+    #   - tagline (already required by the form)
+    #   - what_it_does paragraph
+    #   - at least one of demo_url (deployed) OR extras.demo_video_url
+    # Tagline is enforced by the form's `required` attribute + the Pydantic
+    # max_length; the backend check below is the API-level backstop.
+    _what = (body.what_it_does or "").strip()
+    if not _what:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "what_it_does is required — add a paragraph describing "
+                "the problem and what you built so judges have context."
+            ),
+        )
+    _demo = (body.demo_url or "").strip()
+    _video = ""
+    if isinstance(body.extras, dict):
+        _video = str(body.extras.get("demo_video_url") or "").strip()
+    if not _demo and not _video:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Provide at least one of: deployed demo URL or demo video "
+                "URL. Judges need to see the project working, not just "
+                "read the code."
+            ),
+        )
+
     # Required-extras check
     settings = h.settings_json or {}
     _ensure_extras_complete(body.extras or {}, settings.get("extras_required") or [])
@@ -3248,6 +3279,15 @@ def judge_context(
         HackathonSubmission.submission_status == SubmissionStatus.SUBMITTED.value,
     ).order_by(desc(HackathonSubmission.submitted_at)).all()
 
+    # Bulk-resolve submitter usernames so the judge UI shows @githubname
+    # instead of @<random-user-id>. Single query keyed on the set of
+    # submitter_user_ids — N+1-safe.
+    submitter_ids = list({s.submitter_user_id for s in submissions})
+    submitters_by_id: dict[str, User] = (
+        {u.id: u for u in db.query(User).filter(User.id.in_(submitter_ids)).all()}
+        if submitter_ids else {}
+    )
+
     sub_payload: list[dict[str, Any]] = []
     for s in submissions:
         audit = None
@@ -3262,9 +3302,15 @@ def judge_context(
                 score = pa.v4_score if hasattr(pa, "v4_score") else None
                 tier = pa.v4_tier if hasattr(pa, "v4_tier") else None
 
+        submitter = submitters_by_id.get(s.submitter_user_id)
+
         sub_payload.append({
             "submission_id": str(s.id),
             "submitter_user_id": s.submitter_user_id,
+            # Resolved at response time so the judge UI can render
+            # @githubname instead of @<opaque-user-id>.
+            "submitter_username": submitter.githubUsername if submitter else None,
+            "submitter_name": submitter.name if submitter else None,
             "github_url": s.github_url,
             "team_members": s.team_members_json or [],
             "extras": s.extras_json or {},
