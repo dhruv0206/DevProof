@@ -1157,16 +1157,39 @@ function DetailsPanel({
     // we narrow at the field-read level so a missing/renamed field just
     // results in the section not rendering.
     const v4 = (details.audit?.v4_output ?? {}) as Record<string, unknown>;
-    const claims =
-        (v4.features as Record<string, unknown>[] | undefined) ??
-        (v4.verified_features as Record<string, unknown>[] | undefined) ??
-        [];
-    const architecture =
-        (v4.architecture as Record<string, unknown>[] | undefined) ??
-        (v4.architecture_patterns as Record<string, unknown>[] | undefined) ??
-        [];
-    const skills =
-        (v4.skills as Array<string | { name?: string }> | undefined) ?? [];
+
+    // Each extraction below MUST runtime-check Array.isArray — the V4
+    // schema has shipped multiple shapes for these fields (e.g.
+    // architecture used to be `{ detected_patterns: [...] }` and is
+    // sometimes just an array). A bare type cast does NOT transform the
+    // value at runtime, so casting an object to an array and then
+    // calling `.slice()` crashes the whole panel. Always normalize to
+    // an array of records — fall back to `[]` for unknown shapes.
+    const claimsRaw = v4.features ?? v4.verified_features;
+    const claims: Record<string, unknown>[] = Array.isArray(claimsRaw)
+        ? (claimsRaw as Record<string, unknown>[])
+        : [];
+
+    const architectureRaw = v4.architecture ?? v4.architecture_patterns;
+    const architecture: Record<string, unknown>[] = (() => {
+        if (Array.isArray(architectureRaw)) {
+            return architectureRaw as Record<string, unknown>[];
+        }
+        if (
+            architectureRaw &&
+            typeof architectureRaw === 'object' &&
+            Array.isArray((architectureRaw as Record<string, unknown>).detected_patterns)
+        ) {
+            return (architectureRaw as { detected_patterns: Record<string, unknown>[] })
+                .detected_patterns;
+        }
+        return [];
+    })();
+
+    const skillsRaw = v4.skills;
+    const skills: Array<string | { name?: string }> = Array.isArray(skillsRaw)
+        ? (skillsRaw as Array<string | { name?: string }>)
+        : [];
     // V4 emits score_breakdown as { bucket: { score: number, max: number } }
     // rather than a flat { bucket: number }. Normalize so the renderer below
     // can display "score/max" in both shapes (and gracefully degrade if a
