@@ -161,7 +161,32 @@ export async function POST(
             [normalizedEmail],
         );
         if (userRes.rowCount && userRes.rowCount > 0) {
-            userId = userRes.rows[0].id;
+            const candidateUserId = userRes.rows[0].id;
+
+            // Refuse to mint a session for a user row that has any OAuth
+            // account attached. Without this check, anyone in possession
+            // of the magic link could mint a session bound to that
+            // developer's identity (account takeover). The legitimate
+            // case — the OAuth-account owner accepting their own invite
+            // — is handled by the session-branch above (lines 116-143),
+            // which already requires a matching, verified session email.
+            const oauthCheck = await pool.query<{ providerId: string }>(
+                `SELECT "providerId" FROM account
+                   WHERE "userId" = $1 AND "providerId" <> 'credential'
+                   LIMIT 1`,
+                [candidateUserId],
+            );
+            if (oauthCheck.rowCount && oauthCheck.rowCount > 0) {
+                const provider = String(oauthCheck.rows[0].providerId).toLowerCase();
+                return errorPage(origin, 'Sign in first',
+                    `This invite was issued for ${maskEmail(inv.invited_email)}, ` +
+                    `which is already linked to a DevProof account ` +
+                    `(${provider}). Sign in with ${provider} from the ` +
+                    `top-right menu first, then click the invite link ` +
+                    `again to accept.`);
+            }
+
+            userId = candidateUserId;
         } else {
             // First-time organizer/judge/observer invited via the UI —
             // create a fresh user row. emailVerified stays FALSE for now;

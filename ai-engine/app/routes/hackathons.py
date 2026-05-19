@@ -3010,6 +3010,34 @@ def platform_provision_hackathon(
     # 1. User upsert. Skeleton row created with emailVerified=FALSE; the
     #    magic-link POST handler atomically flips it to TRUE on acceptance.
     user = db.query(User).filter(User.email == email).first()
+
+    # Refuse if this email is already linked to a DevProof developer
+    # identity (any OAuth account attached). Granting an organizer role
+    # to a GitHub-OAuth user here — combined with the magic-link emitted
+    # below — would let anyone who holds the link mint a session for that
+    # developer. Same separation rule enforced by _is_platform_admin()
+    # and create_admin.py. The email-magic-link onboarding flow for
+    # non-developer organizers (sponsors, professors, judges) is the
+    # intended path here, and it stays untouched.
+    if user is not None:
+        oauth_row = db.execute(
+            sql_text(
+                'SELECT "providerId" FROM account WHERE "userId" = :uid '
+                'AND "providerId" <> \'credential\' LIMIT 1'
+            ),
+            {"uid": user.id},
+        ).first()
+        if oauth_row is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This email is already linked to a DevProof developer "
+                    f"account (provider: {oauth_row[0]}). Use a different "
+                    f"email for the organizer, or have them sign in with "
+                    f"that account and accept the invite themselves."
+                ),
+            )
+
     if user is None:
         new_user_id = secrets.token_urlsafe(16)
         now = datetime.now(timezone.utc)
