@@ -38,6 +38,12 @@ interface SubmissionDetail {
     audit_error: string | null;
     repo_score: number | null;
     repo_tier: string | null;
+    /**
+     * Hackathon-adjusted score (forensics excluded). The headline number
+     * on hackathon surfaces. Falls back to `repo_score` when the
+     * backend payload predates this field.
+     */
+    hackathon_adjusted_score?: number | null;
     matched_sponsors: Record<string, number> | null;
     v4_output_url: string | null;
     submitted_at: string;
