@@ -81,11 +81,19 @@ def _hash_password(password: str) -> str:
     return f"{salt_hex}:{key.hex()}"
 
 
-def _ensure_user(db, email: str, name: str | None, platform_admin: bool) -> str:
+def _ensure_user(
+    db, email: str, name: str | None, platform_admin: bool, force: bool
+) -> str:
     """Find or create the user row. Returns user.id.
 
     When ``platform_admin`` is True, sets ``isPlatformAdmin = TRUE`` on the
     user row (creates with the flag set, or upgrades an existing user).
+
+    Refuses to promote / attach a credential to a user row that already has
+    a non-credential account (e.g. GitHub OAuth). Platform admin and
+    developer identities are kept separate by design — see
+    web-platform/src/lib/auth.ts:52-88 for the threat model. Pass
+    ``force=True`` (via --force on the CLI) to override.
     """
     row = db.execute(
         text('SELECT id, "isPlatformAdmin" FROM "user" WHERE email = :email LIMIT 1'),
@@ -93,6 +101,24 @@ def _ensure_user(db, email: str, name: str | None, platform_admin: bool) -> str:
     ).first()
     if row is not None:
         existing_id, is_admin = row[0], row[1]
+
+        oauth_providers = db.execute(
+            text(
+                'SELECT "providerId" FROM account '
+                'WHERE "userId" = :uid AND "providerId" <> :cred'
+            ),
+            {"uid": existing_id, "cred": "credential"},
+        ).fetchall()
+        if oauth_providers and not force:
+            providers = sorted({r[0] for r in oauth_providers})
+            sys.exit(
+                f"✗ user {email} already has OAuth accounts attached "
+                f"({', '.join(providers)}). Refusing to attach a credential "
+                f"password or promote to platform admin: developer identities "
+                f"and admin identities must stay separate. Pass --force to "
+                f"override (you almost certainly want a different email instead)."
+            )
+
         if platform_admin and not is_admin:
             db.execute(
                 text('UPDATE "user" SET "isPlatformAdmin" = TRUE WHERE id = :id'),
@@ -186,6 +212,17 @@ def main() -> None:
             "for DevProof staff who need to manage clients' hackathons."
         ),
     )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Override the safety check that refuses to attach a credential "
+            "(or promote to platform admin) on a user row that already has "
+            "OAuth accounts attached. You almost never want this — use a "
+            "separate admin email instead so developer and admin identities "
+            "stay distinct."
+        ),
+    )
     args = p.parse_args()
 
     password = args.password
@@ -202,7 +239,9 @@ def main() -> None:
     SessionLocal = appdb.SessionLocal
     with SessionLocal() as db:
         print(f"\n→ Provisioning admin: {args.email}")
-        user_id = _ensure_user(db, args.email, args.name, args.platform_admin)
+        user_id = _ensure_user(
+            db, args.email, args.name, args.platform_admin, args.force,
+        )
 
         print("\n→ Setting credential password")
         _upsert_credential_account(db, user_id, password_hash)

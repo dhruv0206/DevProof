@@ -179,19 +179,38 @@ def _require_role(
 
 
 def _is_platform_admin(db: Session, user_id: Optional[str]) -> bool:
-    """Return True iff this user has the platform-admin flag set.
+    """Return True iff this user has the platform-admin flag set AND is
+    a credential-only identity (no OAuth accounts attached).
 
     Platform admins (DevProof staff, created via ``scripts/create_admin.py
     --platform-admin``) get full read/write access to every hackathon on
     the platform — they don't need a per-event role row.
+
+    Defense-in-depth rule: even if ``isPlatformAdmin = TRUE`` somehow ends
+    up on a user row that ALSO has a GitHub OAuth account (e.g. via a
+    manual SQL update, or a future regression in create_admin.py), the
+    backend refuses to honor it. Platform-admin sessions must be minted
+    by the credential password flow at ``/hackathons/admin/login`` — the
+    developer-facing GitHub OAuth identity is never an admin path.
     """
     if not user_id:
         return False
     row = db.execute(
-        sql_text('SELECT "isPlatformAdmin" FROM "user" WHERE id = :uid'),
+        sql_text(
+            'SELECT '
+            '  u."isPlatformAdmin", '
+            '  EXISTS(SELECT 1 FROM account a WHERE a."userId" = u.id '
+            '         AND a."providerId" = \'credential\') AS has_credential, '
+            '  EXISTS(SELECT 1 FROM account a WHERE a."userId" = u.id '
+            '         AND a."providerId" <> \'credential\') AS has_oauth '
+            'FROM "user" u WHERE u.id = :uid'
+        ),
         {"uid": user_id},
     ).first()
-    return bool(row and row[0])
+    if row is None:
+        return False
+    is_admin_flag, has_credential, has_oauth = bool(row[0]), bool(row[1]), bool(row[2])
+    return is_admin_flag and has_credential and not has_oauth
 
 
 def _require_admin_access(
